@@ -6,7 +6,7 @@ A comprehensive EV Charger control system consisting of a Flutter mobile applica
 
 ## 📱 Mobile Application
 
-The mobile app is built with Flutter and provides a user-friendly interface for:
+The mobile app is built with Flutter and provides a user-friendly interface for: 
 
 - **Bluetooth Device Scanning**: Discover and connect to ESP32 devices
 - **Device Control**: Send commands to control connected devices
