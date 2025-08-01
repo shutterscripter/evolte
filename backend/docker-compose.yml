@@ -1,0 +1,38 @@
+version: "3.8"
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    expose:
+      - "3000"
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+      - GMAIL_ID=otp@sunshineiot.in
+      - GMAIL_PASSWORD=sunshine_cdg2015
+      - DB_HOST=localhost
+      - DB_USER=root
+      - DB_PASSWORD=root
+      - DB_NAME=myoffice
+    volumes:
+      - ./:/usr/src/app
+    container_name: volt_controller_backend
+    depends_on:
+      - db
+    command: npm run dev
+  db:
+    image: mysql:5.7
+    platform: linux/amd64
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: myoffice
+    ports:
+      - "3306:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+volumes:
+  db_data:
