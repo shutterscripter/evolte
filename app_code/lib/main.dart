@@ -1,4 +1,5 @@
 import 'package:evolt_controller/app/auth/login_screen.dart';
+import 'package:evolt_controller/app/bottom_nav/bottomnav_bar.dart';
 import 'package:flutter/material.dart';
 import 'package:evolt_controller/app/scan/ble_off/bluetooth_off_view.dart';
 import 'package:evolt_controller/app/scan/scan_view.dart';
@@ -46,9 +47,10 @@ class _MyAppState extends State<MyApp> {
   Widget build(BuildContext context) {
     Widget currentPage = !isLoggedIn
         ? const LoginScreen()
-        : _bluetoothAdapterState != BluetoothAdapterState.on
-        ? const BleOffPage()
-        : const ScanPage();
+        : NavigationExample();
+    //: _bluetoothAdapterState != BluetoothAdapterState.on
+    // const BleOffPage()
+    //     : const ScanPage();
 
     return ScreenUtilInit(
       designSize: const Size(360, 690),

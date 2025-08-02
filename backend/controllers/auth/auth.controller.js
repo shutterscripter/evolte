@@ -31,7 +31,7 @@ class AuthController {
                 .status(StatusCodes.INTERNAL_SERVER_ERROR)
                 .json({ error: "Database error" });
             }
-            return res.status(StatusCodes.OK).json({
+            return res.status(StatusCodes.CONFLICT).json({
               message: "OTP sent to existing user",
             });
           });
@@ -106,6 +106,95 @@ class AuthController {
       res
         .status(StatusCodes.INTERNAL_SERVER_ERROR)
         .json({ error: "Verification failed" });
+    }
+  }
+
+  /// Update or Upload Profile Picture (Upsert)
+  static async uploadProfilePicture(req, res) {
+    try {
+      const { email } = req.body;
+      if (!email) {
+        return res
+          .status(StatusCodes.BAD_REQUEST)
+          .json({ error: "Email is required" });
+      }
+      if (!req.file) {
+        return res
+          .status(StatusCodes.BAD_REQUEST)
+          .json({ error: "Profile picture file is required" });
+      }
+      const profilePicPath = req.file.path;
+      // Check if user exists
+      const checkUserQuery = `SELECT * FROM users WHERE email = ?`;
+      connection.query(checkUserQuery, [email], (err, results) => {
+        if (err) {
+          return res
+            .status(StatusCodes.INTERNAL_SERVER_ERROR)
+            .json({ error: "Database error" });
+        }
+        if (results.length === 0) {
+          return res
+            .status(StatusCodes.NOT_FOUND)
+            .json({ error: "User not found" });
+        }
+        // Upsert profile picture path
+        const updateProfilePicQuery = `UPDATE users SET profile_picture = ? WHERE email = ?`;
+        connection.query(
+          updateProfilePicQuery,
+          [profilePicPath, email],
+          (err2) => {
+            if (err2) {
+              return res
+                .status(StatusCodes.INTERNAL_SERVER_ERROR)
+                .json({ error: "Database error" });
+            }
+            return res.status(StatusCodes.OK).json({
+              message: "Profile picture uploaded/updated successfully",
+              profilePicture: profilePicPath,
+            });
+          }
+        );
+      });
+    } catch (error) {
+      res
+        .status(StatusCodes.INTERNAL_SERVER_ERROR)
+        .json({ error: "Profile picture upload failed" });
+    }
+  }
+
+  /// Get User Info by Email
+  static async getUserInfo(req, res) {
+    try {
+      const { email } = req.body;
+      if (!email) {
+        return res
+          .status(StatusCodes.BAD_REQUEST)
+          .json({ error: "Email is required" });
+      }
+      const getUserQuery = `SELECT id, name, email, profile_picture FROM users WHERE email = ?`;
+      connection.query(getUserQuery, [email], (err, results) => {
+        if (err) {
+          return res
+            .status(StatusCodes.INTERNAL_SERVER_ERROR)
+            .json({ error: "Database error" });
+        }
+        if (results.length === 0) {
+          return res
+            .status(StatusCodes.NOT_FOUND)
+            .json({ error: "User not found" });
+        }
+        let user = results[0];
+        if (user.profile_picture) {
+          user.profile_picture = `${req.protocol}://${req.get("host")}/${
+            user.profile_picture
+          }`;
+        }
+        return res.status(StatusCodes.OK).json(user);
+      });
+    } catch (error) {
+      res
+        .status(StatusCodes.INTERNAL_SERVER_ERROR)
+        .json({ error: "Failed to get user info" });
     }
   }
 }

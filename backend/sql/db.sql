@@ -4,5 +4,11 @@ CREATE TABLE users (
   name VARCHAR(100) NOT NULL,
   email VARCHAR(255) NOT NULL UNIQUE,
   otp CHAR(4) NOT NULL,
-  otp_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  otp_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  profile_picture VARCHAR(255)
 );
+
+
+-- Drop Table
+DROP TABLE IF EXISTS users;
+

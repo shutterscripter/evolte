@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:evolt_controller/app/bottom_nav/bottomnav_bar.dart';
 import 'package:evolt_controller/app/scan/scan_view.dart';
 import 'package:evolt_controller/main.dart';
 import 'package:flutter/material.dart';
@@ -118,8 +119,8 @@ class _OtpScreenState extends State<OtpScreen> {
           );
           SharedPreferences prefs = await SharedPreferences.getInstance();
           await prefs.setBool('auth', true);
-          Get.to(ScanPage());
-
+          //Get.offAll(ScanPage());
+          Get.offAll(() => NavigationExample());
         } else {
           print('Error: ${response.statusCode} - ${response.body}');
           ScaffoldMessenger.of(context).showSnackBar(
@@ -171,7 +172,6 @@ class _OtpScreenState extends State<OtpScreen> {
         });
 
         if (response.statusCode == 200) {
-
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               content: Text('OTP resend successfully!'),
