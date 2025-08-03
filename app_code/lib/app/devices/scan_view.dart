@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'package:evolt_controller/app/controls/controls_screen.dart';
+import 'package:evolt_controller/app/devices/controls/controls_screen.dart';
 import 'package:evolt_controller/consts/consts.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -128,6 +128,9 @@ class _ScanPageState extends State<ScanPage> {
     try {
       List<BluetoothService> services = await device.discoverServices();
 
+      BluetoothCharacteristic? writeCharacteristic;
+      BluetoothCharacteristic? readCharacteristic;
+
       // Look for the ESP32 service (0x180) and characteristics
       for (BluetoothService service in services) {
         print('Found service: ${service.uuid}');
@@ -141,24 +144,27 @@ class _ScanPageState extends State<ScanPage> {
               in service.characteristics) {
             print('Found characteristic: ${characteristic.uuid}');
 
-            // Look for the write characteristic (0xDEAD)
-            String characteristicUuid = characteristic.uuid.
-                toString()
+            String characteristicUuid = characteristic.uuid
+                .toString()
                 .toLowerCase();
-            String targetUuid = dhtCharacteristicUuid.toLowerCase();
 
-            print('Comparing: $characteristicUuid with $targetUuid');
-
-            if (characteristicUuid.contains('dead') ||
-                characteristicUuid == targetUuid) {
-              _selectedCharacteristic = characteristic;
+            // Look for the write characteristic (0xDEAD)
+            if (characteristicUuid.contains('dead')) {
+              writeCharacteristic = characteristic;
               print('Found write characteristic: ${characteristic.uuid}');
-              break;
+            }
+
+            // Look for the read characteristic (0xFEF4)
+            if (characteristicUuid.contains('fef4')) {
+              readCharacteristic = characteristic;
+              print('Found read characteristic: ${characteristic.uuid}');
             }
           }
-          if (_selectedCharacteristic != null) break;
         }
       }
+
+      // Use the write characteristic as primary (for backward compatibility)
+      _selectedCharacteristic = writeCharacteristic ?? readCharacteristic;
 
       if (_selectedCharacteristic == null) {
         // If not found, try to find any writable characteristic
@@ -182,11 +188,14 @@ class _ScanPageState extends State<ScanPage> {
 
       setState(() => _isConnecting = false);
 
-      // Show success message after build
-
-      // Navigate to controls screen
+      // Navigate to controls screen with both characteristics
       if (mounted) {
-        Get.to(ControlsScreen(dhtCharacteristic: _selectedCharacteristic!));
+        Get.to(
+          ControlsScreen(
+            dhtCharacteristic: _selectedCharacteristic!,
+            readCharacteristic: readCharacteristic,
+          ),
+        );
       }
     } catch (e) {
       _setError('Failed to discover services: ${e.toString()}');
@@ -230,7 +239,7 @@ class _ScanPageState extends State<ScanPage> {
         actions: [
           if (!_isScanning)
             IconButton(
-              icon: const Icon(Iconsax.refresh_2),
+              icon: const Icon(Icons.refresh_rounded),
               onPressed: _retryScanning,
               tooltip: 'Refresh',
             ),
@@ -256,8 +265,8 @@ class _ScanPageState extends State<ScanPage> {
   Widget _buildErrorBanner() {
     return Container(
       width: double.infinity,
-      padding:  EdgeInsets.symmetric(horizontal: 16.w, vertical: 12.h),
-      margin:  EdgeInsets.all(16.dg),
+      padding: EdgeInsets.symmetric(horizontal: 16.w, vertical: 12.h),
+      margin: EdgeInsets.all(16.dg),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12.r),
         border: Border.all(color: Colors.red[200]!),
@@ -265,7 +274,7 @@ class _ScanPageState extends State<ScanPage> {
       child: Row(
         children: [
           Icon(Icons.error_outline, color: Colors.red[700], size: 20.sp),
-           SizedBox(width: 8.w),
+          SizedBox(width: 8.w),
           Expanded(
             child: Text(
               _errorMessage,
@@ -275,10 +284,6 @@ class _ScanPageState extends State<ScanPage> {
                 fontWeight: FontWeight.w500,
               ),
             ),
-          ),
-          TextButton(
-            onPressed: _clearError,
-            child: Text('Dismiss', style: TextStyle(color: Colors.red[700])),
           ),
         ],
       ),
@@ -306,7 +311,7 @@ class _ScanPageState extends State<ScanPage> {
         if (filteredResults.isNotEmpty)
           Expanded(
             child: ListView.builder(
-              padding:  EdgeInsets.symmetric(horizontal: 16.h),
+              padding: EdgeInsets.symmetric(horizontal: 16.h),
               itemCount: filteredResults.length,
               itemBuilder: (context, index) {
                 return _buildDeviceTile(filteredResults[index], index);
@@ -323,7 +328,7 @@ class _ScanPageState extends State<ScanPage> {
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Icon(Icons.bluetooth_searching, size: 60.dg, color: Colors.grey[400]),
-           SizedBox(height: 16.h),
+          SizedBox(height: 16.h),
           Text(
             'No Evolte devices found',
             style: TextStyle(
@@ -332,20 +337,20 @@ class _ScanPageState extends State<ScanPage> {
               color: Colors.grey[600],
             ),
           ),
-           SizedBox(height: 8.h),
+          SizedBox(height: 8.h),
           Text(
             'Make sure your Evolte device is nearby and discoverable',
             style: TextStyle(fontSize: 14.sp, color: Colors.grey[500]),
             textAlign: TextAlign.center,
           ),
-           SizedBox(height: 22.h),
+          SizedBox(height: 22.h),
           ElevatedButton.icon(
             onPressed: _retryScanning,
             icon: const Icon(Icons.refresh),
             label: const Text('Scan Again'),
             style: ElevatedButton.styleFrom(
               foregroundColor: Colors.white,
-              padding:  EdgeInsets.symmetric(horizontal: 24.w, vertical: 12.h),
+              padding: EdgeInsets.symmetric(horizontal: 24.w, vertical: 12.h),
             ),
           ),
         ],
@@ -359,7 +364,7 @@ class _ScanPageState extends State<ScanPage> {
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           CircularProgressIndicator(color: Colors.green),
-           SizedBox(height: 16.h),
+          SizedBox(height: 16.h),
           Text(
             'Scanning for Evolte devices...',
             style: TextStyle(
@@ -368,7 +373,7 @@ class _ScanPageState extends State<ScanPage> {
               color: Colors.grey[700],
             ),
           ),
-           SizedBox(height: 8.h),
+          SizedBox(height: 8.h),
           Text(
             'Please wait while we search for nearby devices',
             style: TextStyle(fontSize: 14.sp, color: Colors.grey[500]),
@@ -386,12 +391,14 @@ class _ScanPageState extends State<ScanPage> {
     final rssi = result.rssi;
 
     return Container(
-      margin:  EdgeInsets.only(bottom: 8.h),
+      margin: EdgeInsets.only(bottom: 8.h),
       decoration: BoxDecoration(borderRadius: BorderRadius.circular(12.r)),
       child: ListTile(
-        contentPadding:  EdgeInsets.symmetric(horizontal: 16.w, vertical: 8.h),
+        contentPadding: EdgeInsets.symmetric(horizontal: 16.w, vertical: 8.h),
         tileColor: Theme.of(context).cardColor,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12.r)),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12.r),
+        ),
         leading: Container(
           padding: EdgeInsets.all(8.dg),
           decoration: BoxDecoration(
@@ -414,7 +421,7 @@ class _ScanPageState extends State<ScanPage> {
                   size: 16.sp,
                   color: _getRssiColor(rssi),
                 ),
-                 SizedBox(width: 4.w),
+                SizedBox(width: 4.w),
                 Text(
                   '$rssi dBm',
                   style: TextStyle(

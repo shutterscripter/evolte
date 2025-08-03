@@ -184,7 +184,7 @@ class _LoginScreenState extends State<LoginScreen> {
                             borderRadius: BorderRadius.circular(8.r),
                           ),
                         ),
-                        child: _authController.isLoading
+                        child: authController.isLoading
                             ? const SizedBox(
                                 width: 20,
                                 height: 20,
@@ -193,6 +193,7 @@ class _LoginScreenState extends State<LoginScreen> {
                             : Text('Send OTP', style: TextStyle(fontSize: 12.sp)),
                       ),
                     ],
+
                   ),
 
                   SizedBox(height: 10.h),

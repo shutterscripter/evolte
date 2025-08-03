@@ -1,8 +1,7 @@
-import 'package:evolt_controller/app/auth/login_screen.dart';
 import 'package:evolt_controller/app/bottom_nav/bottomnav_bar.dart';
 import 'package:flutter/material.dart';
-import 'package:evolt_controller/app/scan/ble_off/bluetooth_off_view.dart';
-import 'package:evolt_controller/app/scan/scan_view.dart';
+import 'package:evolt_controller/app/devices/ble_off/bluetooth_off_view.dart';
+import 'package:evolt_controller/app/devices/scan_view.dart';
 import 'package:flex_color_scheme/flex_color_scheme.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
@@ -45,9 +44,11 @@ class _MyAppState extends State<MyApp> {
 
   @override
   Widget build(BuildContext context) {
-    Widget currentPage = !isLoggedIn
-        ? const LoginScreen()
-        : NavigationExample();
+    // Widget currentPage = !isLoggedIn
+    //     ? const LoginScreen()
+    //     : NavigationExample();
+    Widget currentPage = NavigationExample();
+
     //: _bluetoothAdapterState != BluetoothAdapterState.on
     // const BleOffPage()
     //     : const ScanPage();
@@ -60,12 +61,12 @@ class _MyAppState extends State<MyApp> {
         home: currentPage,
         debugShowCheckedModeBanner: false,
         theme: FlexThemeData.light(
-          scheme: FlexScheme.blumineBlue,
+          scheme: FlexScheme.dellGenoa,
           useMaterial3: true,
           typography: Typography.material2021(platform: defaultTargetPlatform),
         ),
         darkTheme: FlexThemeData.dark(
-          scheme: FlexScheme.blumineBlue,
+          scheme: FlexScheme.dellGenoa,
           useMaterial3: true,
           typography: Typography.material2021(platform: defaultTargetPlatform),
         ),

@@ -1,6 +1,6 @@
 import 'package:evolt_controller/app/activities/activities_screen.dart';
 import 'package:evolt_controller/app/favourites/favourites_screen.dart';
-import 'package:evolt_controller/app/scan/scan_view.dart';
+import 'package:evolt_controller/app/devices/scan_view.dart';
 import 'package:evolt_controller/app/settings/settings_screen.dart';
 import 'package:flutter/material.dart';
 

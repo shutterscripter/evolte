@@ -1,6 +1,7 @@
 import 'dart:convert' show jsonEncode;
 
 import 'package:evolt_controller/app/auth/otp_screen.dart';
+import 'package:evolt_controller/consts/api_constants.dart';
 import 'package:evolt_controller/widgets/snackbars.dart';
 import 'package:get/get.dart';
 import 'package:http/http.dart' as http;
@@ -9,7 +10,6 @@ class AuthController extends GetxController {
   bool isLoading = false;
   bool isEmailValid = false;
   bool isNameValid = false;
-  var loginUrl = "http://localhost:3000/api/v1/auth/login";
 
   Future<void> sendOTP(name, email) async {
     isLoading = true;
@@ -17,11 +17,13 @@ class AuthController extends GetxController {
     try {
       http
           .post(
-            Uri.parse(loginUrl),
+            Uri.parse(APIConstants.login),
             headers: {'Content-Type': 'application/json'},
             body: jsonEncode({'name': name, 'email': email}),
           )
           .then((response) {
+            print('Response status: ${response.statusCode}');
+            print('Response body: ${response.body}');
             if (response.statusCode == 201) {
               isLoading = false;
               Snackbars.showSuccess('OTP sent to $email');
@@ -29,9 +31,9 @@ class AuthController extends GetxController {
               Get.to(() => OtpScreen(email: email));
             } else {
               isLoading = false;
+              Snackbars.showSuccess('OTP sent to $email');
 
-              // Handle error
-              Snackbars.showError('Failed to send OTP. Please try again.');
+              Get.to(() => OtpScreen(email: email));
             }
           })
           .catchError((error) {
@@ -44,6 +46,7 @@ class AuthController extends GetxController {
     } catch (e) {
       isLoading = false;
       Snackbars.showError(
+
         'An error occurred while sending OTP. Please try again.',
       );
     }

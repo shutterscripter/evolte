@@ -25,7 +25,7 @@ uint8_t ble_addr_type;
 void ble_app_advertise(void);
 
 #define LIGHT_GPIO 13
-
+static int light_state = 0;
 
 // Write data to ESP32 defined as server
 static int device_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg)
@@ -51,34 +51,36 @@ static int device_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
     {
         printf("LIGHT ON - Turning ON GPIO %d\n", LIGHT_GPIO);
         gpio_set_level(LIGHT_GPIO, 1);
+        light_state = 1;
+
     }
     else if (strcmp(command, "LIGHT OFF") == 0)
     {
         printf("LIGHT OFF - Turning OFF GPIO %d\n", LIGHT_GPIO);
         gpio_set_level(LIGHT_GPIO, 0);
-    }
-    else if (strcmp(command, "FAN ON") == 0)
-    {
-        printf("FAN ON\n");
-        // Add your fan control logic here
-    }
-    else if (strcmp(command, "FAN OFF") == 0)
-    {
-        printf("FAN OFF\n");
-        // Add your fan control logic here
-    }
-    else
-    {
-        printf("Unknown command: '%s'\n", command);
+        light_state = 0;
     }
 
     return 0;
 }
 
 // Read data from ESP32 defined as server
+
 static int device_read(uint16_t con_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
-    os_mbuf_append(ctxt->om, "Data from the server", strlen("Data from the server"));
+    // Get current GPIO state
+    //light_state = gpio_get_level(LIGHT_GPIO);
+
+    // Debug print
+    printf("ESP32: Reading GPIO %d, level = %d\n", LIGHT_GPIO, light_state);
+
+    // Create status message
+    char status_msg[64];
+    snprintf(status_msg, sizeof(status_msg), "GPIO_13:%d", light_state);
+
+    printf("ESP32: Sending status: %s\n", status_msg);
+
+    os_mbuf_append(ctxt->om, status_msg, strlen(status_msg));
     return 0;
 }
 
@@ -171,7 +173,6 @@ void setup_light_gpio()
     gpio_config(&io_conf);
     gpio_set_level(LIGHT_GPIO, 0); // Default OFF
 }
-
 
 //// CODE For Local Server Starts
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
@@ -301,9 +302,9 @@ void app_main()
 {
     nvs_flash_init();
     setup_light_gpio();
-    //wifi_init_sta();   // Initialize Wi-Fi station
-    //start_webserver(); // Start HTTP server
-    // esp_nimble_hci_and_controller_init();      // 2 - Initialize ESP controller
+    // wifi_init_sta();   // Initialize Wi-Fi station
+    // start_webserver(); // Start HTTP server
+    //  esp_nimble_hci_and_controller_init();      // 2 - Initialize ESP controller
     nimble_port_init();                       // 3 - Initialize the host stack
     ble_svc_gap_device_name_set("eVolte_01"); // 4 - Initialize NimBLE configuration - server name
     ble_svc_gap_init();                       // 4 - Initialize NimBLE configuration - gap service

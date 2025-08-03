@@ -1,7 +1,8 @@
 import 'dart:convert';
 
 import 'package:evolt_controller/app/bottom_nav/bottomnav_bar.dart';
-import 'package:evolt_controller/app/scan/scan_view.dart';
+import 'package:evolt_controller/app/devices/scan_view.dart';
+import 'package:evolt_controller/consts/api_constants.dart';
 import 'package:evolt_controller/main.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -99,7 +100,7 @@ class _OtpScreenState extends State<OtpScreen> {
 
     try {
       final response = await http.post(
-        Uri.parse("http://localhost:3000/api/v1/auth/verify-otp"),
+        Uri.parse(APIConstants.verifyOTP),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'email': widget.email, 'otp': int.parse(otp)}),
       );
@@ -189,6 +190,11 @@ class _OtpScreenState extends State<OtpScreen> {
               behavior: SnackBarBehavior.floating,
             ),
           );
+          if (mounted) {
+            setState(() {
+              _isResendLoading = false;
+            });
+          }
         }
       }
     } catch (error) {
