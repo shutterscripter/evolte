@@ -1,12 +1,11 @@
 import 'dart:async';
 import 'package:evolt_controller/app/devices/controls/controls_screen.dart';
-import 'package:evolt_controller/consts/consts.dart';
+import 'package:evolt_controller/app/favourites/favourite_controller.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:get/get.dart';
-import 'package:iconsax_flutter/iconsax_flutter.dart';
 
 class ScanPage extends StatefulWidget {
   const ScanPage({super.key});
@@ -24,6 +23,7 @@ class _ScanPageState extends State<ScanPage> {
   BluetoothCharacteristic? _selectedCharacteristic;
   StreamSubscription<List<ScanResult>>? _scanResultsSubscription;
   StreamSubscription<bool>? _scanningStateSubscription;
+  final FavouriteController _favouriteController = Get.put(FavouriteController());
 
   @override
   void initState() {
@@ -73,7 +73,7 @@ class _ScanPageState extends State<ScanPage> {
       },
       onError: (e) {
         if (kDebugMode) {
-          print('Error in scan results subscription: $e');
+          debugPrint('Error in scan results subscription: $e');
         }
         _setError('Failed to receive scan results');
       },
@@ -88,7 +88,7 @@ class _ScanPageState extends State<ScanPage> {
       },
       onError: (e) {
         if (kDebugMode) {
-          print('Error in scanning state subscription: $e');
+          debugPrint('Error in scanning state subscription: $e');
         }
       },
     );
@@ -133,16 +133,16 @@ class _ScanPageState extends State<ScanPage> {
 
       // Look for the ESP32 service (0x180) and characteristics
       for (BluetoothService service in services) {
-        print('Found service: ${service.uuid}');
+        debugPrint('Found service: ${service.uuid}');
 
         // Check if this is our target service (0x180)
         String serviceUuid = service.uuid.toString().toLowerCase();
         if (serviceUuid.contains('0180') || serviceUuid.contains('180')) {
-          print('Found target service: ${service.uuid}');
+          debugPrint('Found target service: ${service.uuid}');
 
           for (BluetoothCharacteristic characteristic
               in service.characteristics) {
-            print('Found characteristic: ${characteristic.uuid}');
+            debugPrint('Found characteristic: ${characteristic.uuid}');
 
             String characteristicUuid = characteristic.uuid
                 .toString()
@@ -151,13 +151,13 @@ class _ScanPageState extends State<ScanPage> {
             // Look for the write characteristic (0xDEAD)
             if (characteristicUuid.contains('dead')) {
               writeCharacteristic = characteristic;
-              print('Found write characteristic: ${characteristic.uuid}');
+              debugPrint('Found write characteristic: ${characteristic.uuid}');
             }
 
             // Look for the read characteristic (0xFEF4)
             if (characteristicUuid.contains('fef4')) {
               readCharacteristic = characteristic;
-              print('Found read characteristic: ${characteristic.uuid}');
+              debugPrint('Found read characteristic: ${characteristic.uuid}');
             }
           }
         }
@@ -174,7 +174,9 @@ class _ScanPageState extends State<ScanPage> {
             if (characteristic.properties.write ||
                 characteristic.properties.writeWithoutResponse) {
               _selectedCharacteristic = characteristic;
-              print('Using fallback characteristic: ${characteristic.uuid}');
+              debugPrint(
+                'Using fallback characteristic: ${characteristic.uuid}',
+              );
               break;
             }
           }
@@ -235,29 +237,25 @@ class _ScanPageState extends State<ScanPage> {
           'Available Devices',
           style: TextStyle(fontWeight: FontWeight.bold, fontSize: 20.sp),
         ),
-        elevation: 0,
-        actions: [
-          if (!_isScanning)
-            IconButton(
-              icon: const Icon(Icons.refresh_rounded),
-              onPressed: _retryScanning,
-              tooltip: 'Refresh',
-            ),
-        ],
+        elevation: 0
       ),
-      body: Stack(
-        children: [
-          Column(
-            children: [
-              // Error banner
-              if (_hasError) _buildErrorBanner(),
+      body: RefreshIndicator(
+        onRefresh: _retryScanning,
+        color: Theme.of(context).primaryColor,
+        child: Stack(
+          children: [
+            Column(
+              children: [
+                // Error banner
+                if (_hasError) _buildErrorBanner(),
 
-              // Device list
-              Expanded(child: _buildDeviceList()),
-            ],
-          ),
-          _buildLoadingOverlay(),
-        ],
+                // Device list
+                Expanded(child: _buildDeviceList()),
+              ],
+            ),
+            _buildLoadingOverlay(),
+          ],
+        ),
       ),
     );
   }
@@ -373,12 +371,12 @@ class _ScanPageState extends State<ScanPage> {
               color: Colors.grey[700],
             ),
           ),
-          SizedBox(height: 8.h),
-          Text(
-            'Please wait while we search for nearby devices',
-            style: TextStyle(fontSize: 14.sp, color: Colors.grey[500]),
-            textAlign: TextAlign.center,
-          ),
+          // SizedBox(height: 8.h),
+          // Text(
+          //   'Please wait while we search for nearby devices',
+          //   style: TextStyle(fontSize: 14.sp, color: Colors.grey[500]),
+          //   textAlign: TextAlign.center,
+          // ),
         ],
       ),
     );
@@ -391,7 +389,8 @@ class _ScanPageState extends State<ScanPage> {
     final rssi = result.rssi;
 
     return Container(
-      margin: EdgeInsets.only(bottom: 8.h),
+      margin: EdgeInsets.only(top: 8.h),
+
       decoration: BoxDecoration(borderRadius: BorderRadius.circular(12.r)),
       child: ListTile(
         contentPadding: EdgeInsets.symmetric(horizontal: 16.w, vertical: 8.h),
@@ -402,7 +401,11 @@ class _ScanPageState extends State<ScanPage> {
         leading: Container(
           padding: EdgeInsets.all(8.dg),
           decoration: BoxDecoration(
-            color: isConnectable ? Colors.green : Colors.grey[100],
+            color: isConnectable
+                ? Theme.of(
+                    context,
+                  ).primaryColor.withValues(alpha: 0.5)
+                : Colors.grey[100],
             borderRadius: BorderRadius.circular(12.r),
           ),
           child: Icon(Icons.ev_station_outlined, size: 20.sp),
@@ -414,6 +417,13 @@ class _ScanPageState extends State<ScanPage> {
         subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            if (device.remoteId.toString().isNotEmpty) ...[
+              Text(
+                '${device.remoteId}',
+                style: TextStyle(color: Colors.grey[500], fontSize: 8.sp),
+              ),
+            ],
+
             Row(
               children: [
                 Icon(
@@ -430,14 +440,23 @@ class _ScanPageState extends State<ScanPage> {
                     fontWeight: FontWeight.w500,
                   ),
                 ),
+                Obx(() {
+                  final isFav = _favouriteController.isFavorite(device.remoteId.str);
+                  return IconButton(
+                    onPressed: () {
+                      _favouriteController.toggleFavorite(device.remoteId.str);
+                    },
+                    icon: Icon(
+                      isFav ? Icons.favorite : Icons.favorite_border,
+                      color: isFav ? Colors.redAccent : Colors.grey,
+                      size: 20.sp,
+                    ),
+                    tooltip: isFav ? 'Remove from favorites' : 'Add to favorites',
+                  );
+                }),
+
               ],
             ),
-            if (device.remoteId.toString().isNotEmpty) ...[
-              Text(
-                'ID: ${device.remoteId}',
-                style: TextStyle(color: Colors.grey[500], fontSize: 8.sp),
-              ),
-            ],
           ],
         ),
         trailing: SizedBox(
@@ -447,7 +466,7 @@ class _ScanPageState extends State<ScanPage> {
                 ? () => _connectToDevice(device, index)
                 : null,
             style: ElevatedButton.styleFrom(
-              elevation: 2,
+              elevation: 1,
               padding: EdgeInsets.symmetric(horizontal: 16.w, vertical: 8.h),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(12.r),

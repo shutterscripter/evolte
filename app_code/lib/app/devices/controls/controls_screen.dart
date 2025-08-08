@@ -249,35 +249,32 @@ class _ControlsScreenState extends State<ControlsScreen> {
             : theme.colorScheme.surfaceContainer.withValues(alpha: 0.5),
         borderRadius: BorderRadius.circular(24.r),
       ),
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: onPressed,
-          borderRadius: BorderRadius.circular(12.r),
-          child: Container(
-            padding: EdgeInsets.all(16.w),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(
-                  icon,
+      child: InkWell(
+        onTap: onPressed,
+        borderRadius: BorderRadius.circular(24.r),
+        child: Container(
+          padding: EdgeInsets.all(16.w),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                icon,
+                color: onPressed != null
+                    ? (!isOn ? Theme.of(context).primaryColor : Colors.red)
+                    : theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
+                size: 24.sp,
+              ),
+              SizedBox(width: 6.h),
+              Text(
+                label,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  fontWeight: FontWeight.w500,
                   color: onPressed != null
                       ? (!isOn ? Theme.of(context).primaryColor : Colors.red)
                       : theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
-                  size: 24.sp,
                 ),
-                SizedBox(width: 6.h),
-                Text(
-                  label,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    fontWeight: FontWeight.w500,
-                    color: onPressed != null
-                        ? (!isOn ? Theme.of(context).primaryColor : Colors.red)
-                        : theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
-                  ),
-                ),
-              ],
-            ),
+              ),
+            ],
           ),
         ),
       ),

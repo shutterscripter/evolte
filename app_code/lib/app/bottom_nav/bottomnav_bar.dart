@@ -19,6 +19,11 @@ class _NavigationExampleState extends State<NavigationExample> {
     final ThemeData theme = Theme.of(context);
     return Scaffold(
       bottomNavigationBar: NavigationBar(
+        indicatorColor: Theme.of(context).primaryColor,
+        backgroundColor: theme.colorScheme.surface,
+        overlayColor: WidgetStateProperty.all(
+          theme.colorScheme.surface.withValues(alpha: 0.5),
+        ),
         onDestinationSelected: (int index) {
           setState(() {
             currentPageIndex = index;
@@ -29,6 +34,7 @@ class _NavigationExampleState extends State<NavigationExample> {
           NavigationDestination(
             selectedIcon: Icon(Icons.favorite_outlined),
             icon: Icon(Icons.favorite_border_rounded),
+
             label: 'Favorites',
           ),
           NavigationDestination(
