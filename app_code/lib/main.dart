@@ -2,7 +2,6 @@ import 'package:evolt_controller/app/bottom_nav/bottomnav_bar.dart';
 import 'package:flutter/material.dart';
 import 'package:evolt_controller/app/devices/ble_off/bluetooth_off_view.dart';
 import 'package:evolt_controller/app/devices/scan_view.dart';
-import 'package:flex_color_scheme/flex_color_scheme.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
@@ -21,6 +20,8 @@ class MyApp extends StatefulWidget {
 }
 
 class _MyAppState extends State<MyApp> {
+  static const Color _brandSeed = Color(0xFF1F6FEB);
+
   late BluetoothAdapterState _bluetoothAdapterState;
   bool isLoggedIn = false;
 
@@ -60,14 +61,20 @@ class _MyAppState extends State<MyApp> {
         title: 'Flutter BLE App',
         home: currentPage,
         debugShowCheckedModeBanner: false,
-        theme: FlexThemeData.light(
-          scheme: FlexScheme.dellGenoa,
+        theme: ThemeData(
           useMaterial3: true,
+          colorScheme: ColorScheme.fromSeed(
+            seedColor: _brandSeed,
+            brightness: Brightness.light,
+          ),
           typography: Typography.material2021(platform: defaultTargetPlatform),
         ),
-        darkTheme: FlexThemeData.dark(
-          scheme: FlexScheme.dellGenoa,
+        darkTheme: ThemeData(
           useMaterial3: true,
+          colorScheme: ColorScheme.fromSeed(
+            seedColor: _brandSeed,
+            brightness: Brightness.dark,
+          ),
           typography: Typography.material2021(platform: defaultTargetPlatform),
         ),
       ),

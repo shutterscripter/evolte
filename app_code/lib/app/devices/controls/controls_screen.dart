@@ -1,11 +1,12 @@
+import 'dart:async';
 import 'dart:convert';
+
 import 'package:evolt_controller/widgets/snackbars.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:fluttertoast/fluttertoast.dart';
 import 'package:get/get.dart';
-import 'dart:async';
 
 class ControlsScreen extends StatefulWidget {
   final BluetoothCharacteristic dhtCharacteristic;
@@ -22,21 +23,27 @@ class ControlsScreen extends StatefulWidget {
 }
 
 class _ControlsScreenState extends State<ControlsScreen> {
-  late BluetoothCharacteristic _dhtCharacteristic;
+  late BluetoothCharacteristic _writeCharacteristic;
   bool _isConnected = false;
   bool _isSending = false;
-  String _lastReceivedData = '';
   bool _isGpioOn = false;
+  bool? _pendingGpioOn;
+  int? _temperatureC;
+  int? _humidity;
+  bool _dhtOk = false;
+  bool _isLoading = true;
+  String _lastReceivedData = '';
   Timer? _statusTimer;
-  bool isLoading = true;
+  double _swipeProgress = 0;
 
   @override
   void initState() {
     super.initState();
-    _dhtCharacteristic = widget.dhtCharacteristic;
+    _writeCharacteristic = widget.dhtCharacteristic;
     _checkConnection();
     _listenToDevice();
     _startStatusPolling();
+    _readDeviceStatus();
   }
 
   @override
@@ -46,28 +53,20 @@ class _ControlsScreenState extends State<ControlsScreen> {
   }
 
   void _checkConnection() {
+    if (!mounted) return;
     setState(() {
-      _isConnected = _dhtCharacteristic.device.isConnected;
+      _isConnected = _writeCharacteristic.device.isConnected;
     });
   }
 
   void _listenToDevice() async {
     try {
-      await _dhtCharacteristic.setNotifyValue(true);
-      _dhtCharacteristic.lastValueStream.listen(
-        (value) {
-          if (mounted) {
-            setState(() {
-              _lastReceivedData = utf8.decode(value);
-              _parseGpioStatus(_lastReceivedData);
-
-            });
-          }
-        },
-        onError: (error) {
-          if (mounted) {}
-        },
-      );
+      await _writeCharacteristic.setNotifyValue(true);
+      _writeCharacteristic.lastValueStream.listen((value) {
+        if (!mounted || value.isEmpty) return;
+        _lastReceivedData = utf8.decode(value);
+        _parseDeviceStatus(_lastReceivedData);
+      }, onError: (_) {});
     } catch (e) {
       Fluttertoast.showToast(
         msg: 'Failed to listen to device: $e',
@@ -77,40 +76,55 @@ class _ControlsScreenState extends State<ControlsScreen> {
     }
   }
 
-  void _parseGpioStatus(String data) {
-    if (data.startsWith('GPIO_13:')) {
-      String status = data.substring(
-        8,
-      ); // Remove "GPIO_13:" prefix (8 characters)
-      setState(() {
-        _isGpioOn = status == '1';
-        isLoading = false;
-      });
-    } else {
-      debugPrint('⚠️ Unknown data format: $data');
+  void _parseDeviceStatus(String data) {
+    final Map<String, String> values = {};
+    for (final part in data.split(';')) {
+      final segments = part.split(':');
+      if (segments.length >= 2) {
+        values[segments.first.trim()] = segments.sublist(1).join(':').trim();
+      }
     }
+
+    if (!values.containsKey('GPIO_13') || !mounted) {
+      debugPrint('Unknown data format: $data');
+      return;
+    }
+
+    final bool nextGpioOn = values['GPIO_13'] == '1';
+    final bool commandConfirmed =
+        _pendingGpioOn == null || nextGpioOn == _pendingGpioOn;
+
+    setState(() {
+      if (commandConfirmed) {
+        _isGpioOn = nextGpioOn;
+        _pendingGpioOn = null;
+        _isSending = false;
+      }
+      _temperatureC = int.tryParse(values['TEMP_C'] ?? '');
+      _humidity = int.tryParse(values['HUMIDITY'] ?? '');
+      _dhtOk = values['DHT_OK'] == '1';
+      _isLoading = false;
+      _swipeProgress = (_pendingGpioOn ?? _isGpioOn) ? 1 : 0;
+    });
   }
 
   void _startStatusPolling() {
-    _statusTimer = Timer.periodic(Duration(seconds: 2), (timer) {
+    _statusTimer = Timer.periodic(const Duration(seconds: 2), (_) {
       if (_isConnected && mounted) {
-        _readGpioStatus();
+        _readDeviceStatus();
       }
     });
   }
 
-  Future<void> _readGpioStatus() async {
+  Future<void> _readDeviceStatus() async {
     try {
-
-      // Use read characteristic if available, otherwise use write characteristic
-      BluetoothCharacteristic characteristicToRead =
-          widget.readCharacteristic ?? _dhtCharacteristic;
-
-      List<int> value = await characteristicToRead.read();
-      String data = utf8.decode(value);
-      _parseGpioStatus(data);
+      final BluetoothCharacteristic characteristicToRead =
+          widget.readCharacteristic ?? _writeCharacteristic;
+      final List<int> value = await characteristicToRead.read();
+      final String data = utf8.decode(value);
+      _parseDeviceStatus(data);
     } catch (e) {
-      debugPrint('❌ Error reading GPIO status: $e');
+      debugPrint('Error reading device status: $e');
     }
   }
 
@@ -120,163 +134,369 @@ class _ControlsScreenState extends State<ControlsScreen> {
       return;
     }
 
-    setState(() => _isSending = true);
+    final bool targetOn = command == 'LIGHT ON';
+    setState(() {
+      _isSending = true;
+      _pendingGpioOn = targetOn;
+      _swipeProgress = targetOn ? 1 : 0;
+    });
 
     try {
-      // Send simple string command as ESP32 expects
-      await _dhtCharacteristic.write(utf8.encode(command));
-
-      setState(() {
-        _isSending = false;
-      });
-
-      // Read updated status after sending command
-      await Future.delayed(Duration(milliseconds: 500));
-      _readGpioStatus();
-    } catch (e) {
-      setState(() => _isSending = false);
-      Snackbars.showError('Failed to send command, Try again!');
+      await _writeCharacteristic.write(utf8.encode(command));
+      await Future.delayed(const Duration(milliseconds: 350));
+      await _readDeviceStatus();
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+          _pendingGpioOn = null;
+          _swipeProgress = _isGpioOn ? 1 : 0;
+        });
+      }
+      Snackbars.showError('Failed to send command, try again');
     }
   }
 
-  Future<void> _sendLedCommand(String status) async {
-    if (status == '1') {
-      await _sendCommand('LIGHT ON');
-    } else {
-      await _sendCommand('LIGHT OFF');
-    }
+  Future<void> _toggleLight() async {
+    await _sendCommand(_isGpioOn ? 'LIGHT OFF' : 'LIGHT ON');
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final bool displayedGpioOn = _pendingGpioOn ?? _isGpioOn;
 
     return Scaffold(
       backgroundColor: theme.colorScheme.surface,
       appBar: AppBar(
-        title: Text(
-          _dhtCharacteristic.device.platformName,
-          style: TextStyle(fontSize: 18.sp, fontWeight: FontWeight.bold),
-        ),
-        backgroundColor: theme.colorScheme.surface,
+        backgroundColor: Colors.transparent,
+        surfaceTintColor: Colors.transparent,
         elevation: 0,
         leading: IconButton(
-          icon: Icon(Icons.arrow_back_ios, color: theme.colorScheme.onSurface),
+          icon: const Icon(Icons.arrow_back_ios_new),
           onPressed: () => Get.back(),
         ),
-        actions: [
-          Container(
-            margin: EdgeInsets.only(right: 16.w),
-            padding: EdgeInsets.symmetric(horizontal: 12.w, vertical: 6.h),
-            decoration: BoxDecoration(
-              color: _isConnected
-                  ? theme.colorScheme.primaryContainer.withValues(alpha: 0.5)
-                  : theme.colorScheme.errorContainer,
-              borderRadius: BorderRadius.circular(12.r),
+        titleSpacing: 0,
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              _writeCharacteristic.device.platformName,
+              style: theme.textTheme.titleMedium?.copyWith(
+                fontWeight: FontWeight.w700,
+              ),
             ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
+            Text(
+              'Device overview',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          Padding(
+            padding: EdgeInsets.only(right: 20.w),
+            child: _buildStatusChip(theme),
+          ),
+        ],
+      ),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : Column(
               children: [
-                Container(
-                  width: 8.w,
-                  height: 8.h,
-                  decoration: BoxDecoration(
-                    color: _isConnected
-                        ? theme.colorScheme.primary
-                        : theme.colorScheme.error,
-                    shape: BoxShape.circle,
+                if (_isSending) const LinearProgressIndicator(minHeight: 2),
+                Expanded(
+                  child: SingleChildScrollView(
+                    padding: EdgeInsets.fromLTRB(20.w, 8.h, 20.w, 24.h),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        SizedBox(height: 24.h),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: _buildMetricCard(
+                                theme,
+                                label: 'Temperature',
+                                value: _temperatureC != null
+                                    ? '${_temperatureC}°C'
+                                    : '--',
+                                icon: Icons.thermostat_rounded,
+                              ),
+                            ),
+                            SizedBox(width: 12.w),
+                            Expanded(
+                              child: _buildMetricCard(
+                                theme,
+                                label: 'Humidity',
+                                value: _humidity != null ? '${_humidity}%' : '--',
+                                icon: Icons.water_drop_rounded,
+                              ),
+                            ),
+                          ],
+                        ),
+                        SizedBox(height: 12.h),
+                        _buildControlPanel(theme, displayedGpioOn),
+                        SizedBox(height: 24.h),
+                      ],
+                    ),
                   ),
                 ),
-                SizedBox(width: 6.w),
+              ],
+            ),
+    );
+  }
+
+  Widget _buildStatusChip(ThemeData theme) {
+    final Color bg = _isConnected
+        ? theme.colorScheme.surfaceContainerHigh
+        : theme.colorScheme.errorContainer;
+    final Color fg = _isConnected
+        ? theme.colorScheme.onSurface
+        : theme.colorScheme.onErrorContainer;
+
+    return Container(
+      padding: EdgeInsets.symmetric(horizontal: 12.w, vertical: 7.h),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(999.r),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 8.w,
+            height: 8.w,
+            decoration: BoxDecoration(color: fg, shape: BoxShape.circle),
+          ),
+          SizedBox(width: 8.w),
+          Text(
+            _isConnected ? 'Connected' : 'Offline',
+            style: theme.textTheme.labelMedium?.copyWith(
+              color: fg,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSectionTitle(ThemeData theme, String title) {
+    return Text(
+      title,
+      style: theme.textTheme.titleSmall?.copyWith(
+        fontWeight: FontWeight.w700,
+        color: theme.colorScheme.onSurface,
+      ),
+    );
+  }
+
+  Widget _buildMetricCard(
+    ThemeData theme, {
+    required String label,
+    required String value,
+    required IconData icon,
+  }) {
+    return Container(
+      padding: EdgeInsets.symmetric(horizontal: 18.w, vertical: 16.h),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(20.r),
+        border: Border.all(
+          color: theme.colorScheme.outlineVariant.withValues(alpha: 0.35),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: theme.colorScheme.onSurfaceVariant, size: 20.sp),
+          SizedBox(height: 14.h),
+          Text(
+            value,
+            style: theme.textTheme.headlineSmall?.copyWith(
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          SizedBox(height: 4.h),
+          Text(
+            label,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildControlPanel(ThemeData theme, bool displayedGpioOn) {
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.all(20.w),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(24.r),
+        border: Border.all(
+          color: theme.colorScheme.outlineVariant.withValues(alpha: 0.35),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [_buildSwipeControl(theme, displayedGpioOn)],
+      ),
+    );
+  }
+
+  Widget _buildSwipeControl(ThemeData theme, bool displayedGpioOn) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        const double thumbSize = 52;
+        final double width = constraints.maxWidth;
+        final double maxDrag = width - thumbSize - 12.w;
+        final double left = 6.w + (_swipeProgress * maxDrag);
+        final bool canInteract = _isConnected && !_isSending;
+        final Color trackColor = displayedGpioOn
+            ? theme.colorScheme.errorContainer
+            : theme.colorScheme.primaryContainer;
+        final Color thumbColor = displayedGpioOn
+            ? theme.colorScheme.error
+            : theme.colorScheme.primary;
+
+        return Container(
+          height: 64.h,
+          decoration: BoxDecoration(
+            color: canInteract
+                ? trackColor
+                : theme.colorScheme.surfaceContainerHigh,
+            borderRadius: BorderRadius.circular(18.r),
+          ),
+          child: Stack(
+            alignment: Alignment.centerLeft,
+            children: [
+              Center(
+                child: Text(
+                  _isSending
+                      ? 'Updating...'
+                      : displayedGpioOn
+                      ? 'Swipe left to turn off'
+                      : 'Swipe right to turn on',
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    color: canInteract
+                        ? theme.colorScheme.onSurface
+                        : theme.colorScheme.onSurfaceVariant,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              AnimatedPositioned(
+                duration: const Duration(milliseconds: 140),
+                curve: Curves.easeOut,
+                left: left,
+                child: GestureDetector(
+                  onHorizontalDragUpdate: canInteract
+                      ? (details) {
+                          setState(() {
+                            _swipeProgress =
+                                (_swipeProgress + (details.delta.dx / maxDrag))
+                                    .clamp(0.0, 1.0);
+                          });
+                        }
+                      : null,
+                  onHorizontalDragEnd: canInteract
+                      ? (_) async {
+                          final bool targetOn = _swipeProgress > 0.5;
+                          final bool changed = targetOn != _isGpioOn;
+                          setState(() {
+                            _swipeProgress = targetOn ? 1 : 0;
+                          });
+                          if (changed) {
+                            await _toggleLight();
+                          }
+                        }
+                      : null,
+                  child: Container(
+                    width: thumbSize.w,
+                    height: thumbSize.w,
+                    decoration: BoxDecoration(
+                      color: thumbColor,
+                      borderRadius: BorderRadius.circular(16.r),
+                    ),
+                    child: _isSending
+                        ? const Center(
+                            child: SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            ),
+                          )
+                        : Icon(
+                            displayedGpioOn
+                                ? Icons.keyboard_double_arrow_left_rounded
+                                : Icons.keyboard_double_arrow_right_rounded,
+                            color: Colors.white,
+                          ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildHealthCard(ThemeData theme) {
+    final Color tone = _dhtOk
+        ? theme.colorScheme.primary
+        : theme.colorScheme.tertiary;
+    final String title = _dhtOk ? 'Stable' : 'Recovering';
+    final String body = _dhtOk
+        ? 'DHT11 is responding normally.'
+        : 'Keeping the last valid reading until the next successful sample.';
+
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.all(18.w),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(20.r),
+        border: Border.all(
+          color: theme.colorScheme.outlineVariant.withValues(alpha: 0.35),
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.sensors_rounded, color: tone, size: 20.sp),
+          SizedBox(width: 12.w),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
                 Text(
-                  _isConnected ? 'Connected' : 'Disconnected',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: _isConnected
-                        ? theme.colorScheme.onPrimaryContainer
-                        : theme.colorScheme.onErrorContainer,
-                    fontWeight: FontWeight.w500,
+                  title,
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    color: theme.colorScheme.onSurface,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                SizedBox(height: 4.h),
+                Text(
+                  body,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                    height: 1.35,
                   ),
                 ),
               ],
             ),
           ),
         ],
-      ),
-      body: isLoading
-          ? Center(child: CircularProgressIndicator())
-          : SingleChildScrollView(
-              padding: EdgeInsets.all(20.w),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Power Control',
-                    style: TextStyle(fontWeight: FontWeight.w500),
-                  ),
-                  SizedBox(height: 10.h),
-                  _buildControlButton(
-                    theme,
-                    icon: Icons.power,
-                    label: _isGpioOn ? 'Turn OFF' : 'Turn ON',
-                    isOn: _isGpioOn,
-                    onPressed: _isConnected && !_isSending
-                        ? () => _isGpioOn
-                              ? _sendLedCommand('0')
-                              : _sendLedCommand('1')
-                        : null,
-                  ),
-                ],
-              ),
-            ),
-    );
-  }
-
-  Widget _buildControlButton(
-    ThemeData theme, {
-    required IconData icon,
-    required String label,
-    required bool isOn,
-    required VoidCallback? onPressed,
-  }) {
-    return Container(
-      height: 80.h,
-      width: Get.width / 2,
-      decoration: BoxDecoration(
-        color: onPressed != null
-            ? (!isOn
-                  ? theme.colorScheme.primaryContainer.withValues(alpha: 0.5)
-                  : Colors.red.withValues(alpha: 0.2))
-            : theme.colorScheme.surfaceContainer.withValues(alpha: 0.5),
-        borderRadius: BorderRadius.circular(24.r),
-      ),
-      child: InkWell(
-        onTap: onPressed,
-        borderRadius: BorderRadius.circular(24.r),
-        child: Container(
-          padding: EdgeInsets.all(16.w),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(
-                icon,
-                color: onPressed != null
-                    ? (!isOn ? Theme.of(context).primaryColor : Colors.red)
-                    : theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
-                size: 24.sp,
-              ),
-              SizedBox(width: 6.h),
-              Text(
-                label,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  fontWeight: FontWeight.w500,
-                  color: onPressed != null
-                      ? (!isOn ? Theme.of(context).primaryColor : Colors.red)
-                      : theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
-                ),
-              ),
-            ],
-          ),
-        ),
       ),
     );
   }

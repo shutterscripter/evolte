@@ -40,7 +40,6 @@ dependencies:
   flutter_screenutil: ^5.9.3
   gap: ^3.0.1
   fluttertoast: ^8.2.12
-  flex_color_scheme: ^8.2.0
   iconsax_flutter: ^1.0.1
   shared_preferences: ^2.5.3
   http: ^1.4.0

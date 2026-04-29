@@ -19,13 +19,134 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "lwip/ip4_addr.h"
+#include "esp_timer.h"
+#include "esp_rom_sys.h"
+#include "freertos/portmacro.h"
+#include <string.h>
+#include <stdbool.h>
 
 char *TAG = "BLE-Server";
 uint8_t ble_addr_type;
 void ble_app_advertise(void);
 
 #define LIGHT_GPIO 13
+#define DHT11_GPIO 4
+
 static int light_state = 0;
+static int temperature_c = -1;
+static int humidity_pct = -1;
+static bool dht_valid = false;
+static int dht_fail_count = 0;
+
+static esp_err_t dht11_read(int *temperature, int *humidity);
+static void dht11_task(void *param);
+
+static int wait_for_level(int level, int timeout_us)
+{
+    int64_t start = esp_timer_get_time();
+    while (gpio_get_level(DHT11_GPIO) != level)
+    {
+        if ((esp_timer_get_time() - start) > timeout_us)
+        {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static esp_err_t dht11_read(int *temperature, int *humidity)
+{
+    uint8_t data[5] = {0};
+    portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
+
+    gpio_set_direction(DHT11_GPIO, GPIO_MODE_OUTPUT);
+    gpio_set_level(DHT11_GPIO, 0);
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    taskENTER_CRITICAL(&mux);
+    gpio_set_level(DHT11_GPIO, 1);
+    esp_rom_delay_us(30);
+    gpio_set_direction(DHT11_GPIO, GPIO_MODE_INPUT);
+
+    if (wait_for_level(0, 100) < 0 || wait_for_level(1, 100) < 0 || wait_for_level(0, 100) < 0)
+    {
+        taskEXIT_CRITICAL(&mux);
+        return ESP_FAIL;
+    }
+
+    for (int i = 0; i < 40; i++)
+    {
+        if (wait_for_level(1, 70) < 0)
+        {
+            taskEXIT_CRITICAL(&mux);
+            return ESP_FAIL;
+        }
+
+        int64_t pulse_start = esp_timer_get_time();
+        if (wait_for_level(0, 120) < 0)
+        {
+            taskEXIT_CRITICAL(&mux);
+            return ESP_FAIL;
+        }
+
+        int64_t pulse_width = esp_timer_get_time() - pulse_start;
+        data[i / 8] <<= 1;
+        if (pulse_width > 40)
+        {
+            data[i / 8] |= 1;
+        }
+    }
+    taskEXIT_CRITICAL(&mux);
+
+    if (((data[0] + data[1] + data[2] + data[3]) & 0xFF) != data[4])
+    {
+        return ESP_ERR_INVALID_CRC;
+    }
+
+    *humidity = data[0];
+    *temperature = data[2];
+    return ESP_OK;
+}
+
+static void dht11_task(void *param)
+{
+    while (1)
+    {
+        esp_err_t err = ESP_FAIL;
+        int temp = 0;
+        int hum = 0;
+
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            err = dht11_read(&temp, &hum);
+            if (err == ESP_OK)
+            {
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(40));
+        }
+
+        if (err == ESP_OK)
+        {
+            temperature_c = temp;
+            humidity_pct = hum;
+            dht_valid = true;
+            dht_fail_count = 0;
+            ESP_LOGI(TAG, "DHT11 temp=%dC humidity=%d%%", temperature_c, humidity_pct);
+        }
+        else
+        {
+            dht_fail_count++;
+            if (dht_fail_count >= 3)
+            {
+                dht_valid = false;
+            }
+            ESP_LOGW(TAG, "Failed to read DHT11: %s (count=%d)", esp_err_to_name(err), dht_fail_count);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(4000));
+    }
+}
 
 // Write data to ESP32 defined as server
 static int device_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg)
@@ -68,15 +189,16 @@ static int device_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
 
 static int device_read(uint16_t con_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
-    // Get current GPIO state
-    //light_state = gpio_get_level(LIGHT_GPIO);
-
-    // Debug print
-    printf("ESP32: Reading GPIO %d, level = %d\n", LIGHT_GPIO, light_state);
-
-    // Create status message
-    char status_msg[64];
-    snprintf(status_msg, sizeof(status_msg), "GPIO_13:%d", light_state);
+    char status_msg[96];
+    snprintf(
+        status_msg,
+        sizeof(status_msg),
+        "GPIO_13:%d;TEMP_C:%d;HUMIDITY:%d;DHT_OK:%d",
+        light_state,
+        temperature_c,
+        humidity_pct,
+        dht_valid ? 1 : 0
+    );
 
     printf("ESP32: Sending status: %s\n", status_msg);
 
@@ -172,6 +294,17 @@ void setup_light_gpio()
         .intr_type = GPIO_INTR_DISABLE};
     gpio_config(&io_conf);
     gpio_set_level(LIGHT_GPIO, 0); // Default OFF
+}
+
+void setup_dht_gpio()
+{
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << DHT11_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = 1,
+        .pull_down_en = 0,
+        .intr_type = GPIO_INTR_DISABLE};
+    gpio_config(&io_conf);
 }
 
 //// CODE For Local Server Starts
@@ -302,6 +435,8 @@ void app_main()
 {
     nvs_flash_init();
     setup_light_gpio();
+    setup_dht_gpio();
+    xTaskCreate(dht11_task, "dht11_task", 4096, NULL, 5, NULL);
     // wifi_init_sta();   // Initialize Wi-Fi station
     // start_webserver(); // Start HTTP server
     //  esp_nimble_hci_and_controller_init();      // 2 - Initialize ESP controller
