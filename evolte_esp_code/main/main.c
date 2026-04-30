@@ -30,7 +30,7 @@ uint8_t ble_addr_type;
 void ble_app_advertise(void);
 
 #define LIGHT_GPIO 13
-#define DHT11_GPIO 4
+#define DHT11_GPIO 12
 
 static int light_state = 0;
 static int temperature_c = -1;

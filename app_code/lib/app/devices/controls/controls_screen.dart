@@ -23,6 +23,8 @@ class ControlsScreen extends StatefulWidget {
 }
 
 class _ControlsScreenState extends State<ControlsScreen> {
+  static const int _highTemperatureThresholdC = 45;
+
   late BluetoothCharacteristic _writeCharacteristic;
   bool _isConnected = false;
   bool _isSending = false;
@@ -165,6 +167,8 @@ class _ControlsScreenState extends State<ControlsScreen> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final bool displayedGpioOn = _pendingGpioOn ?? _isGpioOn;
+    final bool isHighTemperature =
+        (_temperatureC ?? 0) >= _highTemperatureThresholdC;
 
     return Scaffold(
       backgroundColor: theme.colorScheme.surface,
@@ -213,6 +217,10 @@ class _ControlsScreenState extends State<ControlsScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         SizedBox(height: 24.h),
+                        if (isHighTemperature) ...[
+                          _buildTemperatureWarning(theme),
+                          SizedBox(height: 12.h),
+                        ],
                         Row(
                           children: [
                             Expanded(
@@ -245,6 +253,53 @@ class _ControlsScreenState extends State<ControlsScreen> {
                 ),
               ],
             ),
+    );
+  }
+
+  Widget _buildTemperatureWarning(ThemeData theme) {
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.symmetric(horizontal: 16.w, vertical: 14.h),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.errorContainer,
+        borderRadius: BorderRadius.circular(18.r),
+        border: Border.all(
+          color: theme.colorScheme.error.withValues(alpha: 0.18),
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            Icons.warning_amber_rounded,
+            color: theme.colorScheme.error,
+            size: 22.sp,
+          ),
+          SizedBox(width: 12.w),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'High temperature warning',
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    color: theme.colorScheme.onErrorContainer,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                SizedBox(height: 4.h),
+                Text(
+                  'Current temperature is ${_temperatureC}°C. Please check the device and surrounding environment.',
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: theme.colorScheme.onErrorContainer,
+                    height: 1.3,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 
