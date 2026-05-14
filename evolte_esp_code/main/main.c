@@ -19,134 +19,56 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "lwip/ip4_addr.h"
-#include "esp_timer.h"
-#include "esp_rom_sys.h"
-#include "freertos/portmacro.h"
+#include "driver/i2c_master.h"
+#include "esp_adc/adc_oneshot.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
+#include "esp_lcd_panel_io.h"
+#include "esp_lcd_panel_ops.h"
+#include "esp_lcd_panel_vendor.h"
 #include <string.h>
 #include <stdbool.h>
+#include <stdio.h>
 
 char *TAG = "BLE-Server";
 uint8_t ble_addr_type;
 void ble_app_advertise(void);
 
 #define LIGHT_GPIO 13
-#define DHT11_GPIO 12
+#define RELAY_ACTIVE_LEVEL 0
+#define RELAY_INACTIVE_LEVEL 1
+#define VOLTAGE_SENSOR_GPIO 34
+#define VOLTAGE_DIVIDER_RATIO 5.0f
+#define VOLTAGE_SENSOR_SAMPLES 16
+#define OLED_SDA_GPIO 21
+#define OLED_SCL_GPIO 22
+#define OLED_H_RES 128
+#define OLED_V_RES 64
 
 static int light_state = 0;
-static int temperature_c = -1;
-static int humidity_pct = -1;
-static bool dht_valid = false;
-static int dht_fail_count = 0;
+static adc_oneshot_unit_handle_t adc1_handle;
+static adc_cali_handle_t adc_cali_handle = NULL;
+static bool adc_calibration_enabled = false;
+static float voltage_reading_v = 0.0f;
+static int adc_raw_reading = 0;
+static bool voltage_valid = false;
+static bool ble_connected = false;
+static i2c_master_bus_handle_t i2c_bus_handle = NULL;
+static esp_lcd_panel_io_handle_t oled_io_handle = NULL;
+static esp_lcd_panel_handle_t oled_panel_handle = NULL;
+static uint8_t oled_framebuffer[OLED_H_RES * OLED_V_RES / 8];
+static uint8_t oled_i2c_address = 0x3C;
 
-static esp_err_t dht11_read(int *temperature, int *humidity);
-static void dht11_task(void *param);
-
-static int wait_for_level(int level, int timeout_us)
-{
-    int64_t start = esp_timer_get_time();
-    while (gpio_get_level(DHT11_GPIO) != level)
-    {
-        if ((esp_timer_get_time() - start) > timeout_us)
-        {
-            return -1;
-        }
-    }
-    return 0;
-}
-
-static esp_err_t dht11_read(int *temperature, int *humidity)
-{
-    uint8_t data[5] = {0};
-    portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
-
-    gpio_set_direction(DHT11_GPIO, GPIO_MODE_OUTPUT);
-    gpio_set_level(DHT11_GPIO, 0);
-    vTaskDelay(pdMS_TO_TICKS(20));
-
-    taskENTER_CRITICAL(&mux);
-    gpio_set_level(DHT11_GPIO, 1);
-    esp_rom_delay_us(30);
-    gpio_set_direction(DHT11_GPIO, GPIO_MODE_INPUT);
-
-    if (wait_for_level(0, 100) < 0 || wait_for_level(1, 100) < 0 || wait_for_level(0, 100) < 0)
-    {
-        taskEXIT_CRITICAL(&mux);
-        return ESP_FAIL;
-    }
-
-    for (int i = 0; i < 40; i++)
-    {
-        if (wait_for_level(1, 70) < 0)
-        {
-            taskEXIT_CRITICAL(&mux);
-            return ESP_FAIL;
-        }
-
-        int64_t pulse_start = esp_timer_get_time();
-        if (wait_for_level(0, 120) < 0)
-        {
-            taskEXIT_CRITICAL(&mux);
-            return ESP_FAIL;
-        }
-
-        int64_t pulse_width = esp_timer_get_time() - pulse_start;
-        data[i / 8] <<= 1;
-        if (pulse_width > 40)
-        {
-            data[i / 8] |= 1;
-        }
-    }
-    taskEXIT_CRITICAL(&mux);
-
-    if (((data[0] + data[1] + data[2] + data[3]) & 0xFF) != data[4])
-    {
-        return ESP_ERR_INVALID_CRC;
-    }
-
-    *humidity = data[0];
-    *temperature = data[2];
-    return ESP_OK;
-}
-
-static void dht11_task(void *param)
-{
-    while (1)
-    {
-        esp_err_t err = ESP_FAIL;
-        int temp = 0;
-        int hum = 0;
-
-        for (int attempt = 0; attempt < 3; attempt++)
-        {
-            err = dht11_read(&temp, &hum);
-            if (err == ESP_OK)
-            {
-                break;
-            }
-            vTaskDelay(pdMS_TO_TICKS(40));
-        }
-
-        if (err == ESP_OK)
-        {
-            temperature_c = temp;
-            humidity_pct = hum;
-            dht_valid = true;
-            dht_fail_count = 0;
-            ESP_LOGI(TAG, "DHT11 temp=%dC humidity=%d%%", temperature_c, humidity_pct);
-        }
-        else
-        {
-            dht_fail_count++;
-            if (dht_fail_count >= 3)
-            {
-                dht_valid = false;
-            }
-            ESP_LOGW(TAG, "Failed to read DHT11: %s (count=%d)", esp_err_to_name(err), dht_fail_count);
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(4000));
-    }
-}
+static void init_voltage_sensor(void);
+static void voltage_sensor_task(void *param);
+static void init_oled_display(void);
+static void oled_task(void *param);
+static void oled_clear_buffer(void);
+static void oled_draw_text(int x, int page, const char *text);
+static void oled_draw_char(int x, int page, char c);
+static const uint8_t *oled_get_glyph(char c);
+static void oled_flush_buffer(void);
+static void oled_draw_icon(int x, int page, bool connected);
 
 // Write data to ESP32 defined as server
 static int device_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg)
@@ -171,14 +93,14 @@ static int device_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
     if (strcmp(command, "LIGHT ON") == 0)
     {
         printf("LIGHT ON - Turning ON GPIO %d\n", LIGHT_GPIO);
-        gpio_set_level(LIGHT_GPIO, 1);
+        gpio_set_level(LIGHT_GPIO, RELAY_ACTIVE_LEVEL);
         light_state = 1;
 
     }
     else if (strcmp(command, "LIGHT OFF") == 0)
     {
         printf("LIGHT OFF - Turning OFF GPIO %d\n", LIGHT_GPIO);
-        gpio_set_level(LIGHT_GPIO, 0);
+        gpio_set_level(LIGHT_GPIO, RELAY_INACTIVE_LEVEL);
         light_state = 0;
     }
 
@@ -193,11 +115,11 @@ static int device_read(uint16_t con_handle, uint16_t attr_handle, struct ble_gat
     snprintf(
         status_msg,
         sizeof(status_msg),
-        "GPIO_13:%d;TEMP_C:%d;HUMIDITY:%d;DHT_OK:%d",
+        "GPIO_13:%d;VOLTAGE_V:%.2f;ADC_RAW:%d;SENSOR_OK:%d",
         light_state,
-        temperature_c,
-        humidity_pct,
-        dht_valid ? 1 : 0
+        voltage_reading_v,
+        adc_raw_reading,
+        voltage_valid ? 1 : 0
     );
 
     printf("ESP32: Sending status: %s\n", status_msg);
@@ -231,12 +153,18 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI("GAP", "BLE GAP EVENT CONNECT %s", event->connect.status == 0 ? "OK!" : "FAILED!");
         if (event->connect.status != 0)
         {
+            ble_connected = false;
             ble_app_advertise();
+        }
+        else
+        {
+            ble_connected = true;
         }
         break;
     // Advertise again after completion of the event
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI("GAP", "BLE GAP EVENT DISCONNECTED");
+        ble_connected = false;
         ble_app_advertise();
         break;
     case BLE_GAP_EVENT_ADV_COMPLETE:
@@ -293,18 +221,327 @@ void setup_light_gpio()
         .pull_down_en = 0,
         .intr_type = GPIO_INTR_DISABLE};
     gpio_config(&io_conf);
-    gpio_set_level(LIGHT_GPIO, 0); // Default OFF
+    gpio_set_level(LIGHT_GPIO, RELAY_INACTIVE_LEVEL); // Default OFF
 }
 
 void setup_dht_gpio()
 {
     gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << DHT11_GPIO),
+        .pin_bit_mask = (1ULL << VOLTAGE_SENSOR_GPIO),
         .mode = GPIO_MODE_INPUT,
-        .pull_up_en = 1,
+        .pull_up_en = 0,
         .pull_down_en = 0,
         .intr_type = GPIO_INTR_DISABLE};
     gpio_config(&io_conf);
+}
+
+static void init_voltage_sensor(void)
+{
+    adc_oneshot_unit_init_cfg_t unit_cfg = {
+        .unit_id = ADC_UNIT_1,
+        .ulp_mode = ADC_ULP_MODE_DISABLE,
+    };
+    ESP_ERROR_CHECK(adc_oneshot_new_unit(&unit_cfg, &adc1_handle));
+
+    adc_oneshot_chan_cfg_t channel_cfg = {
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+        .atten = ADC_ATTEN_DB_12,
+    };
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, ADC_CHANNEL_6, &channel_cfg));
+
+    adc_cali_line_fitting_config_t cali_cfg = {
+        .unit_id = ADC_UNIT_1,
+        .atten = ADC_ATTEN_DB_12,
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+    };
+
+    if (adc_cali_create_scheme_line_fitting(&cali_cfg, &adc_cali_handle) == ESP_OK)
+    {
+        adc_calibration_enabled = true;
+    }
+    else
+    {
+        ESP_LOGW(TAG, "ADC calibration unavailable, falling back to raw conversion");
+    }
+}
+
+static void voltage_sensor_task(void *param)
+{
+    while (1)
+    {
+        int raw_sum = 0;
+        for (int i = 0; i < VOLTAGE_SENSOR_SAMPLES; i++)
+        {
+            int raw = 0;
+            if (adc_oneshot_read(adc1_handle, ADC_CHANNEL_6, &raw) == ESP_OK)
+            {
+                raw_sum += raw;
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+
+        adc_raw_reading = raw_sum / VOLTAGE_SENSOR_SAMPLES;
+
+        int adc_mv = 0;
+        if (adc_calibration_enabled)
+        {
+            if (adc_cali_raw_to_voltage(adc_cali_handle, adc_raw_reading, &adc_mv) == ESP_OK)
+            {
+                voltage_valid = true;
+                voltage_reading_v = (adc_mv / 1000.0f) * VOLTAGE_DIVIDER_RATIO;
+            }
+            else
+            {
+                voltage_valid = false;
+            }
+        }
+        else
+        {
+            voltage_valid = true;
+            voltage_reading_v = ((adc_raw_reading / 4095.0f) * 3.3f) * VOLTAGE_DIVIDER_RATIO;
+        }
+
+        ESP_LOGI(TAG, "Voltage sensor raw=%d voltage=%.2fV", adc_raw_reading, voltage_reading_v);
+        vTaskDelay(pdMS_TO_TICKS(1500));
+    }
+}
+
+static void init_oled_display(void)
+{
+    i2c_master_bus_config_t i2c_bus_conf = {
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .sda_io_num = OLED_SDA_GPIO,
+        .scl_io_num = OLED_SCL_GPIO,
+        .i2c_port = -1,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
+    };
+    ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_conf, &i2c_bus_handle));
+
+    if (i2c_master_probe(i2c_bus_handle, 0x3C, 50) == ESP_OK)
+    {
+        oled_i2c_address = 0x3C;
+    }
+    else if (i2c_master_probe(i2c_bus_handle, 0x3D, 50) == ESP_OK)
+    {
+        oled_i2c_address = 0x3D;
+    }
+    else
+    {
+        ESP_LOGW(TAG, "No OLED ACK found on 0x3C or 0x3D, skipping OLED init");
+        return;
+    }
+
+    ESP_LOGI(TAG, "OLED detected at I2C address 0x%02X", oled_i2c_address);
+
+    esp_lcd_panel_io_i2c_config_t io_config = {
+        .dev_addr = oled_i2c_address,
+        .scl_speed_hz = 100000,
+        .control_phase_bytes = 1,
+        .dc_bit_offset = 6,
+        .lcd_cmd_bits = 8,
+        .lcd_param_bits = 8,
+    };
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(i2c_bus_handle, &io_config, &oled_io_handle));
+
+    esp_lcd_panel_ssd1306_config_t ssd1306_config = {
+        .height = OLED_V_RES,
+    };
+    esp_lcd_panel_dev_config_t panel_config = {
+        .bits_per_pixel = 1,
+        .reset_gpio_num = -1,
+        .vendor_config = &ssd1306_config,
+    };
+    ESP_ERROR_CHECK(esp_lcd_new_panel_ssd1306(oled_io_handle, &panel_config, &oled_panel_handle));
+    ESP_ERROR_CHECK(esp_lcd_panel_reset(oled_panel_handle));
+    ESP_ERROR_CHECK(esp_lcd_panel_init(oled_panel_handle));
+    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(oled_panel_handle, true));
+    oled_clear_buffer();
+    oled_flush_buffer();
+}
+
+static void oled_clear_buffer(void)
+{
+    memset(oled_framebuffer, 0, sizeof(oled_framebuffer));
+}
+
+static const uint8_t *oled_get_glyph(char c)
+{
+    static const uint8_t glyph_space[5] = {0x00, 0x00, 0x00, 0x00, 0x00};
+    static const uint8_t glyph_dot[5]   = {0x00, 0x60, 0x60, 0x00, 0x00};
+    static const uint8_t glyph_colon[5] = {0x00, 0x36, 0x36, 0x00, 0x00};
+    static const uint8_t glyph_0[5]     = {0x3E, 0x51, 0x49, 0x45, 0x3E};
+    static const uint8_t glyph_1[5]     = {0x00, 0x42, 0x7F, 0x40, 0x00};
+    static const uint8_t glyph_2[5]     = {0x42, 0x61, 0x51, 0x49, 0x46};
+    static const uint8_t glyph_3[5]     = {0x21, 0x41, 0x45, 0x4B, 0x31};
+    static const uint8_t glyph_4[5]     = {0x18, 0x14, 0x12, 0x7F, 0x10};
+    static const uint8_t glyph_5[5]     = {0x27, 0x45, 0x45, 0x45, 0x39};
+    static const uint8_t glyph_6[5]     = {0x3C, 0x4A, 0x49, 0x49, 0x30};
+    static const uint8_t glyph_7[5]     = {0x01, 0x71, 0x09, 0x05, 0x03};
+    static const uint8_t glyph_8[5]     = {0x36, 0x49, 0x49, 0x49, 0x36};
+    static const uint8_t glyph_9[5]     = {0x06, 0x49, 0x49, 0x29, 0x1E};
+    static const uint8_t glyph_A[5]     = {0x7E, 0x11, 0x11, 0x11, 0x7E};
+    static const uint8_t glyph_D[5]     = {0x7F, 0x41, 0x41, 0x22, 0x1C};
+    static const uint8_t glyph_E[5]     = {0x7F, 0x49, 0x49, 0x49, 0x41};
+    static const uint8_t glyph_F[5]     = {0x7F, 0x09, 0x09, 0x09, 0x01};
+    static const uint8_t glyph_G[5]     = {0x3E, 0x41, 0x49, 0x49, 0x7A};
+    static const uint8_t glyph_I[5]     = {0x00, 0x41, 0x7F, 0x41, 0x00};
+    static const uint8_t glyph_L[5]     = {0x7F, 0x40, 0x40, 0x40, 0x40};
+    static const uint8_t glyph_M[5]     = {0x7F, 0x02, 0x0C, 0x02, 0x7F};
+    static const uint8_t glyph_N[5]     = {0x7F, 0x02, 0x0C, 0x10, 0x7F};
+    static const uint8_t glyph_O[5]     = {0x3E, 0x41, 0x41, 0x41, 0x3E};
+    static const uint8_t glyph_P[5]     = {0x7F, 0x09, 0x09, 0x09, 0x06};
+    static const uint8_t glyph_R[5]     = {0x7F, 0x09, 0x19, 0x29, 0x46};
+    static const uint8_t glyph_S[5]     = {0x46, 0x49, 0x49, 0x49, 0x31};
+    static const uint8_t glyph_T[5]     = {0x01, 0x01, 0x7F, 0x01, 0x01};
+    static const uint8_t glyph_V[5]     = {0x1F, 0x20, 0x40, 0x20, 0x1F};
+    static const uint8_t glyph_W[5]     = {0x7F, 0x20, 0x18, 0x20, 0x7F};
+
+    switch (c)
+    {
+    case '0': return glyph_0;
+    case '1': return glyph_1;
+    case '2': return glyph_2;
+    case '3': return glyph_3;
+    case '4': return glyph_4;
+    case '5': return glyph_5;
+    case '6': return glyph_6;
+    case '7': return glyph_7;
+    case '8': return glyph_8;
+    case '9': return glyph_9;
+    case 'A': return glyph_A;
+    case 'D': return glyph_D;
+    case 'E': return glyph_E;
+    case 'F': return glyph_F;
+    case 'G': return glyph_G;
+    case 'I': return glyph_I;
+    case 'L': return glyph_L;
+    case 'M': return glyph_M;
+    case 'N': return glyph_N;
+    case 'O': return glyph_O;
+    case 'P': return glyph_P;
+    case 'R': return glyph_R;
+    case 'S': return glyph_S;
+    case 'T': return glyph_T;
+    case 'V': return glyph_V;
+    case 'W': return glyph_W;
+    case '.': return glyph_dot;
+    case ':': return glyph_colon;
+    case ' ': return glyph_space;
+    default:  return glyph_space;
+    }
+}
+
+static void oled_draw_char(int x, int page, char c)
+{
+    if (page < 0 || page >= (OLED_V_RES / 8) || x < 0 || x > (OLED_H_RES - 5))
+    {
+        return;
+    }
+
+    const uint8_t *glyph = oled_get_glyph(c);
+    int offset = page * OLED_H_RES + x;
+    for (int i = 0; i < 5; i++)
+    {
+        oled_framebuffer[offset + i] = glyph[i];
+    }
+}
+
+static void oled_draw_text(int x, int page, const char *text)
+{
+    while (*text && x <= (OLED_H_RES - 6))
+    {
+        oled_draw_char(x, page, *text++);
+        x += 6;
+    }
+}
+
+static void oled_draw_icon(int x, int page, bool connected)
+{
+    static const uint8_t bt_icon[32] = {
+        0x00, 0xFC, 0x04, 0x04, 0x04, 0xE4, 0x24, 0x24,
+        0x24, 0x24, 0xE4, 0x04, 0x04, 0x04, 0xFC, 0x00,
+        0x00, 0x3F, 0x20, 0x20, 0x20, 0x27, 0x24, 0x24,
+        0x24, 0x24, 0x27, 0x20, 0x20, 0x20, 0x3F, 0x00
+    };
+    static const uint8_t disconnected_icon[16] = {
+        0x81, 0x42, 0x24, 0x18, 0x18, 0x24, 0x42, 0x81,
+        0x81, 0x42, 0x24, 0x18, 0x18, 0x24, 0x42, 0x81
+    };
+
+    if (page < 0 || page >= ((OLED_V_RES / 8) - 1))
+    {
+        return;
+    }
+
+    if (connected)
+    {
+        if (x < 0 || x > (OLED_H_RES - 16))
+        {
+            return;
+        }
+        for (int row = 0; row < 2; row++)
+        {
+            int offset = (page + row) * OLED_H_RES + x;
+            for (int i = 0; i < 16; i++)
+            {
+                oled_framebuffer[offset + i] = bt_icon[row * 16 + i];
+            }
+        }
+    }
+    else
+    {
+        if (x < 0 || x > (OLED_H_RES - 8))
+        {
+            return;
+        }
+        int offset = page * OLED_H_RES + x;
+        int offset2 = (page + 1) * OLED_H_RES + x;
+        for (int i = 0; i < 8; i++)
+        {
+            oled_framebuffer[offset + i] = disconnected_icon[i];
+            oled_framebuffer[offset2 + i] = disconnected_icon[i + 8];
+        }
+    }
+}
+
+static void oled_flush_buffer(void)
+{
+    ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(
+        oled_panel_handle,
+        0,
+        0,
+        OLED_H_RES,
+        OLED_V_RES,
+        oled_framebuffer));
+}
+
+static void oled_task(void *param)
+{
+    char line1[22];
+    char line2[22];
+    char line3[22];
+
+    while (1)
+    {
+        int voltage_centivolts = (int)(voltage_reading_v * 100.0f + 0.5f);
+        int voltage_whole = voltage_centivolts / 100;
+        int voltage_frac = voltage_centivolts % 100;
+
+        snprintf(line1, sizeof(line1), "VOLT %2d.%02dV", voltage_whole, voltage_frac);
+        snprintf(line2, sizeof(line2), "RAW  %4d", adc_raw_reading);
+        snprintf(line3, sizeof(line3), "LOAD %s", light_state ? "ON" : "OFF");
+
+        oled_clear_buffer();
+        oled_draw_text(0, 0, "GM009605 OLED");
+        oled_draw_icon(112, 0, ble_connected);
+        oled_draw_text(0, 2, line1);
+        oled_draw_text(0, 4, line2);
+        oled_draw_text(0, 6, line3);
+        oled_flush_buffer();
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 }
 
 //// CODE For Local Server Starts
@@ -436,7 +673,13 @@ void app_main()
     nvs_flash_init();
     setup_light_gpio();
     setup_dht_gpio();
-    xTaskCreate(dht11_task, "dht11_task", 4096, NULL, 5, NULL);
+    init_voltage_sensor();
+    init_oled_display();
+    xTaskCreate(voltage_sensor_task, "voltage_sensor_task", 4096, NULL, 5, NULL);
+    if (oled_panel_handle != NULL)
+    {
+        xTaskCreate(oled_task, "oled_task", 4096, NULL, 4, NULL);
+    }
     // wifi_init_sta();   // Initialize Wi-Fi station
     // start_webserver(); // Start HTTP server
     //  esp_nimble_hci_and_controller_init();      // 2 - Initialize ESP controller

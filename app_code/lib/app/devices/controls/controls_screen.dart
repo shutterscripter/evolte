@@ -23,16 +23,14 @@ class ControlsScreen extends StatefulWidget {
 }
 
 class _ControlsScreenState extends State<ControlsScreen> {
-  static const int _highTemperatureThresholdC = 45;
-
   late BluetoothCharacteristic _writeCharacteristic;
   bool _isConnected = false;
   bool _isSending = false;
   bool _isGpioOn = false;
   bool? _pendingGpioOn;
-  int? _temperatureC;
-  int? _humidity;
-  bool _dhtOk = false;
+  double? _voltageV;
+  int? _adcRaw;
+  bool _sensorOk = false;
   bool _isLoading = true;
   String _lastReceivedData = '';
   Timer? _statusTimer;
@@ -102,9 +100,9 @@ class _ControlsScreenState extends State<ControlsScreen> {
         _pendingGpioOn = null;
         _isSending = false;
       }
-      _temperatureC = int.tryParse(values['TEMP_C'] ?? '');
-      _humidity = int.tryParse(values['HUMIDITY'] ?? '');
-      _dhtOk = values['DHT_OK'] == '1';
+      _voltageV = double.tryParse(values['VOLTAGE_V'] ?? '');
+      _adcRaw = int.tryParse(values['ADC_RAW'] ?? '');
+      _sensorOk = values['SENSOR_OK'] == '1';
       _isLoading = false;
       _swipeProgress = (_pendingGpioOn ?? _isGpioOn) ? 1 : 0;
     });
@@ -167,8 +165,6 @@ class _ControlsScreenState extends State<ControlsScreen> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final bool displayedGpioOn = _pendingGpioOn ?? _isGpioOn;
-    final bool isHighTemperature =
-        (_temperatureC ?? 0) >= _highTemperatureThresholdC;
 
     return Scaffold(
       backgroundColor: theme.colorScheme.surface,
@@ -217,35 +213,33 @@ class _ControlsScreenState extends State<ControlsScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         SizedBox(height: 24.h),
-                        if (isHighTemperature) ...[
-                          _buildTemperatureWarning(theme),
-                          SizedBox(height: 12.h),
-                        ],
                         Row(
                           children: [
                             Expanded(
                               child: _buildMetricCard(
                                 theme,
-                                label: 'Temperature',
-                                value: _temperatureC != null
-                                    ? '${_temperatureC}°C'
+                                label: 'Voltage',
+                                value: _voltageV != null
+                                    ? '${_voltageV!.toStringAsFixed(2)} V'
                                     : '--',
-                                icon: Icons.thermostat_rounded,
+                                icon: Icons.bolt_rounded,
                               ),
                             ),
                             SizedBox(width: 12.w),
                             Expanded(
                               child: _buildMetricCard(
                                 theme,
-                                label: 'Humidity',
-                                value: _humidity != null ? '${_humidity}%' : '--',
-                                icon: Icons.water_drop_rounded,
+                                label: 'ADC Raw',
+                                value: _adcRaw != null ? '$_adcRaw' : '--',
+                                icon: Icons.speed_rounded,
                               ),
                             ),
                           ],
                         ),
                         SizedBox(height: 12.h),
                         _buildControlPanel(theme, displayedGpioOn),
+                        SizedBox(height: 12.h),
+                        _buildSensorInfoCard(theme),
                         SizedBox(height: 24.h),
                       ],
                     ),
@@ -253,53 +247,6 @@ class _ControlsScreenState extends State<ControlsScreen> {
                 ),
               ],
             ),
-    );
-  }
-
-  Widget _buildTemperatureWarning(ThemeData theme) {
-    return Container(
-      width: double.infinity,
-      padding: EdgeInsets.symmetric(horizontal: 16.w, vertical: 14.h),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.errorContainer,
-        borderRadius: BorderRadius.circular(18.r),
-        border: Border.all(
-          color: theme.colorScheme.error.withValues(alpha: 0.18),
-        ),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(
-            Icons.warning_amber_rounded,
-            color: theme.colorScheme.error,
-            size: 22.sp,
-          ),
-          SizedBox(width: 12.w),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'High temperature warning',
-                  style: theme.textTheme.titleSmall?.copyWith(
-                    color: theme.colorScheme.onErrorContainer,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                SizedBox(height: 4.h),
-                Text(
-                  'Current temperature is ${_temperatureC}°C. Please check the device and surrounding environment.',
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: theme.colorScheme.onErrorContainer,
-                    height: 1.3,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
     );
   }
 
@@ -400,6 +347,57 @@ class _ControlsScreenState extends State<ControlsScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [_buildSwipeControl(theme, displayedGpioOn)],
+      ),
+    );
+  }
+
+  Widget _buildSensorInfoCard(ThemeData theme) {
+    final Color tone = _sensorOk
+        ? theme.colorScheme.primary
+        : theme.colorScheme.tertiary;
+    final String title = _sensorOk ? 'Sensor active' : 'Sensor waiting';
+    final String body = _sensorOk
+        ? 'Live voltage is being read from GPIO34 through the divider module.'
+        : 'Waiting for a stable reading from the voltage sensor on GPIO34.';
+
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.all(18.w),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(20.r),
+        border: Border.all(
+          color: theme.colorScheme.outlineVariant.withValues(alpha: 0.35),
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.electrical_services_rounded, color: tone, size: 20.sp),
+          SizedBox(width: 12.w),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    color: theme.colorScheme.onSurface,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                SizedBox(height: 4.h),
+                Text(
+                  body,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                    height: 1.35,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -505,54 +503,4 @@ class _ControlsScreenState extends State<ControlsScreen> {
     );
   }
 
-  Widget _buildHealthCard(ThemeData theme) {
-    final Color tone = _dhtOk
-        ? theme.colorScheme.primary
-        : theme.colorScheme.tertiary;
-    final String title = _dhtOk ? 'Stable' : 'Recovering';
-    final String body = _dhtOk
-        ? 'DHT11 is responding normally.'
-        : 'Keeping the last valid reading until the next successful sample.';
-
-    return Container(
-      width: double.infinity,
-      padding: EdgeInsets.all(18.w),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(20.r),
-        border: Border.all(
-          color: theme.colorScheme.outlineVariant.withValues(alpha: 0.35),
-        ),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(Icons.sensors_rounded, color: tone, size: 20.sp),
-          SizedBox(width: 12.w),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: theme.textTheme.titleSmall?.copyWith(
-                    color: theme.colorScheme.onSurface,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                SizedBox(height: 4.h),
-                Text(
-                  body,
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                    height: 1.35,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }
