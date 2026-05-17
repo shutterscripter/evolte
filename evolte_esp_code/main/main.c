@@ -34,7 +34,12 @@ char *TAG = "BLE-Server";
 uint8_t ble_addr_type;
 void ble_app_advertise(void);
 
-#define LIGHT_GPIO 13
+#define LIGHT_GPIO 14
+#define BLUE_LED_GPIO 26
+#define GREEN_LED_GPIO 27
+#define RED_LED_GPIO 25
+#define BUZZER_GPIO 33
+#define SWITCH_GPIO 4
 #define RELAY_ACTIVE_LEVEL 0
 #define RELAY_INACTIVE_LEVEL 1
 #define VOLTAGE_SENSOR_GPIO 34
@@ -50,14 +55,18 @@ static adc_oneshot_unit_handle_t adc1_handle;
 static adc_cali_handle_t adc_cali_handle = NULL;
 static bool adc_calibration_enabled = false;
 static float voltage_reading_v = 0.0f;
+static float current_reading_a = 0.0f;
+static float power_reading_w = 0.0f;
 static int adc_raw_reading = 0;
 static bool voltage_valid = false;
 static bool ble_connected = false;
+static bool switch_active = false;
 static i2c_master_bus_handle_t i2c_bus_handle = NULL;
 static esp_lcd_panel_io_handle_t oled_io_handle = NULL;
 static esp_lcd_panel_handle_t oled_panel_handle = NULL;
 static uint8_t oled_framebuffer[OLED_H_RES * OLED_V_RES / 8];
 static uint8_t oled_i2c_address = 0x3C;
+char current_text[16];
 
 static void init_voltage_sensor(void);
 static void voltage_sensor_task(void *param);
@@ -66,9 +75,15 @@ static void oled_task(void *param);
 static void oled_clear_buffer(void);
 static void oled_draw_text(int x, int page, const char *text);
 static void oled_draw_char(int x, int page, char c);
+static void oled_draw_text_scaled(int x, int y, const char *text, int scale);
 static const uint8_t *oled_get_glyph(char c);
 static void oled_flush_buffer(void);
-static void oled_draw_icon(int x, int page, bool connected);
+static void switch_task(void *param);
+static void set_light_state(bool on);
+static void oled_set_pixel(int x, int y, bool on);
+static void oled_draw_hline(int x, int y, int length);
+static void oled_draw_rect(int x, int y, int width, int height);
+static void oled_fill_rect(int x, int y, int width, int height);
 
 // Write data to ESP32 defined as server
 static int device_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg)
@@ -93,15 +108,12 @@ static int device_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
     if (strcmp(command, "LIGHT ON") == 0)
     {
         printf("LIGHT ON - Turning ON GPIO %d\n", LIGHT_GPIO);
-        gpio_set_level(LIGHT_GPIO, RELAY_ACTIVE_LEVEL);
-        light_state = 1;
-
+        set_light_state(true);
     }
     else if (strcmp(command, "LIGHT OFF") == 0)
     {
         printf("LIGHT OFF - Turning OFF GPIO %d\n", LIGHT_GPIO);
-        gpio_set_level(LIGHT_GPIO, RELAY_INACTIVE_LEVEL);
-        light_state = 0;
+        set_light_state(false);
     }
 
     return 0;
@@ -111,14 +123,16 @@ static int device_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_g
 
 static int device_read(uint16_t con_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
-    char status_msg[96];
+    char status_msg[128];
     snprintf(
         status_msg,
         sizeof(status_msg),
-        "GPIO_13:%d;VOLTAGE_V:%.2f;ADC_RAW:%d;SENSOR_OK:%d",
+        "GPIO_13:%d;SWITCH:%d;VOLTAGE_V:%.2f;CURRENT_A:%.2f;POWER_W:%.2f;SENSOR_OK:%d",
         light_state,
+        switch_active ? 1 : 0,
         voltage_reading_v,
-        adc_raw_reading,
+        current_reading_a,
+        power_reading_w,
         voltage_valid ? 1 : 0
     );
 
@@ -221,8 +235,37 @@ void setup_light_gpio()
         .pull_down_en = 0,
         .intr_type = GPIO_INTR_DISABLE};
     gpio_config(&io_conf);
-    gpio_set_level(LIGHT_GPIO, RELAY_INACTIVE_LEVEL); // Default OFF
+    set_light_state(false); // Default OFF
 }
+
+void setup_status_leds()
+{
+    gpio_config_t io_conf = {
+        .pin_bit_mask =
+            (1ULL << BLUE_LED_GPIO) |
+            (1ULL << GREEN_LED_GPIO) |
+            (1ULL << RED_LED_GPIO),
+
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = 0,
+        .pull_down_en = 0,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+
+    gpio_config(&io_conf);
+
+    gpio_set_level(BLUE_LED_GPIO, 0);
+    gpio_set_level(GREEN_LED_GPIO, 0);
+    gpio_set_level(RED_LED_GPIO, 0);
+}
+
+static void set_light_state(bool on)
+{
+    gpio_set_level(LIGHT_GPIO, on ? RELAY_ACTIVE_LEVEL : RELAY_INACTIVE_LEVEL);
+    light_state = on ? 1 : 0;
+}
+
+
 
 void setup_dht_gpio()
 {
@@ -230,6 +273,17 @@ void setup_dht_gpio()
         .pin_bit_mask = (1ULL << VOLTAGE_SENSOR_GPIO),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = 0,
+        .pull_down_en = 0,
+        .intr_type = GPIO_INTR_DISABLE};
+    gpio_config(&io_conf);
+}
+
+void setup_switch_gpio()
+{
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << SWITCH_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = 1,
         .pull_down_en = 0,
         .intr_type = GPIO_INTR_DISABLE};
     gpio_config(&io_conf);
@@ -264,31 +318,41 @@ static void init_voltage_sensor(void)
         ESP_LOGW(TAG, "ADC calibration unavailable, falling back to raw conversion");
     }
 }
-
 static void voltage_sensor_task(void *param)
 {
     while (1)
     {
         int raw_sum = 0;
+
         for (int i = 0; i < VOLTAGE_SENSOR_SAMPLES; i++)
         {
             int raw = 0;
-            if (adc_oneshot_read(adc1_handle, ADC_CHANNEL_6, &raw) == ESP_OK)
+
+            if (adc_oneshot_read(adc1_handle,
+                                 ADC_CHANNEL_6,
+                                 &raw) == ESP_OK)
             {
                 raw_sum += raw;
             }
+
             vTaskDelay(pdMS_TO_TICKS(10));
         }
 
         adc_raw_reading = raw_sum / VOLTAGE_SENSOR_SAMPLES;
 
         int adc_mv = 0;
+
         if (adc_calibration_enabled)
         {
-            if (adc_cali_raw_to_voltage(adc_cali_handle, adc_raw_reading, &adc_mv) == ESP_OK)
+            if (adc_cali_raw_to_voltage(adc_cali_handle,
+                                        adc_raw_reading,
+                                        &adc_mv) == ESP_OK)
             {
                 voltage_valid = true;
-                voltage_reading_v = (adc_mv / 1000.0f) * VOLTAGE_DIVIDER_RATIO;
+
+                voltage_reading_v =
+                    (adc_mv / 1000.0f) *
+                    VOLTAGE_DIVIDER_RATIO;
             }
             else
             {
@@ -298,11 +362,105 @@ static void voltage_sensor_task(void *param)
         else
         {
             voltage_valid = true;
-            voltage_reading_v = ((adc_raw_reading / 4095.0f) * 3.3f) * VOLTAGE_DIVIDER_RATIO;
+
+            voltage_reading_v =
+                ((adc_raw_reading / 4095.0f) * 3.3f) *
+                VOLTAGE_DIVIDER_RATIO;
         }
 
-        ESP_LOGI(TAG, "Voltage sensor raw=%d voltage=%.2fV", adc_raw_reading, voltage_reading_v);
+        // =========================
+        // CURRENT CALCULATION
+        // =========================
+
+        current_reading_a =
+            voltage_reading_v * 0.4f;
+
+        // =========================
+        // POWER CALCULATION
+        // =========================
+
+        power_reading_w =
+            voltage_reading_v * current_reading_a;
+
+        // =========================
+        // ALERT LOGIC
+        // =========================
+
+       if (power_reading_w > 4.0f)
+        {
+            // Alert LED ON
+            gpio_set_level(RED_LED_GPIO, 1);
+
+            // Beautiful double beep
+            for (int i = 0; i < 2; i++)
+            {
+                gpio_set_level(BUZZER_GPIO, 1);
+                vTaskDelay(pdMS_TO_TICKS(120));
+
+                gpio_set_level(BUZZER_GPIO, 0);
+                vTaskDelay(pdMS_TO_TICKS(120));
+            }
+
+            vTaskDelay(pdMS_TO_TICKS(400));
+        }
+        else
+        {
+            gpio_set_level(RED_LED_GPIO, 0);
+            gpio_set_level(BUZZER_GPIO, 0);
+        }
+
+        if(current_reading_a > 1.2f)
+        {
+            gpio_set_level(BLUE_LED_GPIO, 1);
+        }else
+        {
+            gpio_set_level(BLUE_LED_GPIO, 0);
+
+        }
+
+        ESP_LOGI(TAG,
+                 "Voltage=%.2fV Current=%.2fA Power=%.2fW",
+                 voltage_reading_v,
+                 current_reading_a,
+                 power_reading_w);
+
         vTaskDelay(pdMS_TO_TICKS(1500));
+    }
+}
+static void switch_task(void *param)
+{
+    bool last_sample = false;
+    bool last_reported = false;
+    int stable_count = 0;
+
+    while (1)
+    {
+        bool sample_active = gpio_get_level(SWITCH_GPIO) == 0;
+        if (sample_active == last_sample)
+        {
+            if (stable_count < 3)
+            {
+                stable_count++;
+            }
+        }
+        else
+        {
+            stable_count = 0;
+        }
+
+        if (stable_count >= 2)
+        {
+            switch_active = sample_active;
+            if (switch_active && !last_reported)
+            {
+                set_light_state(!light_state);
+                ESP_LOGI(TAG, "Manual switch toggled relay, new state=%d", light_state);
+            }
+            last_reported = switch_active;
+        }
+
+        last_sample = sample_active;
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 
@@ -355,6 +513,12 @@ static void init_oled_display(void)
     ESP_ERROR_CHECK(esp_lcd_new_panel_ssd1306(oled_io_handle, &panel_config, &oled_panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_reset(oled_panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_init(oled_panel_handle));
+    ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(oled_panel_handle, false));
+
+ESP_ERROR_CHECK(esp_lcd_panel_mirror(
+    oled_panel_handle,
+    true,
+    true));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(oled_panel_handle, true));
     oled_clear_buffer();
     oled_flush_buffer();
@@ -394,8 +558,10 @@ static const uint8_t *oled_get_glyph(char c)
     static const uint8_t glyph_R[5]     = {0x7F, 0x09, 0x19, 0x29, 0x46};
     static const uint8_t glyph_S[5]     = {0x46, 0x49, 0x49, 0x49, 0x31};
     static const uint8_t glyph_T[5]     = {0x01, 0x01, 0x7F, 0x01, 0x01};
+    static const uint8_t glyph_U[5]     = {0x3F, 0x40, 0x40, 0x40, 0x3F};
     static const uint8_t glyph_V[5]     = {0x1F, 0x20, 0x40, 0x20, 0x1F};
     static const uint8_t glyph_W[5]     = {0x7F, 0x20, 0x18, 0x20, 0x7F};
+    static const uint8_t glyph_Y[5]     = {0x03, 0x04, 0x78, 0x04, 0x03};
 
     switch (c)
     {
@@ -423,8 +589,10 @@ static const uint8_t *oled_get_glyph(char c)
     case 'R': return glyph_R;
     case 'S': return glyph_S;
     case 'T': return glyph_T;
+    case 'U': return glyph_U;
     case 'V': return glyph_V;
     case 'W': return glyph_W;
+    case 'Y': return glyph_Y;
     case '.': return glyph_dot;
     case ':': return glyph_colon;
     case ' ': return glyph_space;
@@ -456,52 +624,83 @@ static void oled_draw_text(int x, int page, const char *text)
     }
 }
 
-static void oled_draw_icon(int x, int page, bool connected)
+static void oled_set_pixel(int x, int y, bool on)
 {
-    static const uint8_t bt_icon[32] = {
-        0x00, 0xFC, 0x04, 0x04, 0x04, 0xE4, 0x24, 0x24,
-        0x24, 0x24, 0xE4, 0x04, 0x04, 0x04, 0xFC, 0x00,
-        0x00, 0x3F, 0x20, 0x20, 0x20, 0x27, 0x24, 0x24,
-        0x24, 0x24, 0x27, 0x20, 0x20, 0x20, 0x3F, 0x00
-    };
-    static const uint8_t disconnected_icon[16] = {
-        0x81, 0x42, 0x24, 0x18, 0x18, 0x24, 0x42, 0x81,
-        0x81, 0x42, 0x24, 0x18, 0x18, 0x24, 0x42, 0x81
-    };
-
-    if (page < 0 || page >= ((OLED_V_RES / 8) - 1))
+    if (x < 0 || x >= OLED_H_RES || y < 0 || y >= OLED_V_RES)
     {
         return;
     }
 
-    if (connected)
+    int page = y / 8;
+    int bit = y % 8;
+    int offset = page * OLED_H_RES + x;
+    if (on)
     {
-        if (x < 0 || x > (OLED_H_RES - 16))
-        {
-            return;
-        }
-        for (int row = 0; row < 2; row++)
-        {
-            int offset = (page + row) * OLED_H_RES + x;
-            for (int i = 0; i < 16; i++)
-            {
-                oled_framebuffer[offset + i] = bt_icon[row * 16 + i];
-            }
-        }
+        oled_framebuffer[offset] |= (1 << bit);
     }
     else
     {
-        if (x < 0 || x > (OLED_H_RES - 8))
+        oled_framebuffer[offset] &= ~(1 << bit);
+    }
+}
+
+static void oled_draw_hline(int x, int y, int length)
+{
+    for (int i = 0; i < length; i++)
+    {
+        oled_set_pixel(x + i, y, true);
+    }
+}
+
+static void oled_draw_rect(int x, int y, int width, int height)
+{
+    oled_draw_hline(x, y, width);
+    oled_draw_hline(x, y + height - 1, width);
+    for (int i = 0; i < height; i++)
+    {
+        oled_set_pixel(x, y + i, true);
+        oled_set_pixel(x + width - 1, y + i, true);
+    }
+}
+
+static void oled_fill_rect(int x, int y, int width, int height)
+{
+    for (int row = 0; row < height; row++)
+    {
+        oled_draw_hline(x, y + row, width);
+    }
+}
+
+static void oled_draw_text_scaled(int x, int y, const char *text, int scale)
+{
+    if (scale <= 0)
+    {
+        return;
+    }
+
+    while (*text)
+    {
+        const uint8_t *glyph = oled_get_glyph(*text++);
+        for (int col = 0; col < 5; col++)
         {
-            return;
+            for (int row = 0; row < 7; row++)
+            {
+                if (glyph[col] & (1 << row))
+                {
+                    for (int dx = 0; dx < scale; dx++)
+                    {
+                        for (int dy = 0; dy < scale; dy++)
+                        {
+                            oled_set_pixel(
+                                x + (col * scale) + dx,
+                                y + (row * scale) + dy,
+                                true);
+                        }
+                    }
+                }
+            }
         }
-        int offset = page * OLED_H_RES + x;
-        int offset2 = (page + 1) * OLED_H_RES + x;
-        for (int i = 0; i < 8; i++)
-        {
-            oled_framebuffer[offset + i] = disconnected_icon[i];
-            oled_framebuffer[offset2 + i] = disconnected_icon[i + 8];
-        }
+        x += (6 * scale);
     }
 }
 
@@ -518,31 +717,84 @@ static void oled_flush_buffer(void)
 
 static void oled_task(void *param)
 {
-    char line1[22];
-    char line2[22];
-    char line3[22];
+    char voltage_text[16];
+    char current_text[16];
+    char power_text[16];
+    char relay_text[8];
 
     while (1)
     {
+        // Voltage
         int voltage_centivolts = (int)(voltage_reading_v * 100.0f + 0.5f);
         int voltage_whole = voltage_centivolts / 100;
         int voltage_frac = voltage_centivolts % 100;
 
-        snprintf(line1, sizeof(line1), "VOLT %2d.%02dV", voltage_whole, voltage_frac);
-        snprintf(line2, sizeof(line2), "RAW  %4d", adc_raw_reading);
-        snprintf(line3, sizeof(line3), "LOAD %s", light_state ? "ON" : "OFF");
+        // Current = Voltage × 0.4
+        float current_reading = voltage_reading_v * 0.4f;
+
+        int current_centi = (int)(current_reading * 100.0f + 0.5f);
+        int current_whole = current_centi / 100;
+        int current_frac = current_centi % 100;
+
+        // Power = V × I
+        float power_reading = voltage_reading_v * current_reading;
+
+        int power_centi = (int)(power_reading * 100.0f + 0.5f);
+        int power_whole = power_centi / 100;
+        int power_frac = power_centi % 100;
+
+        // Format strings
+        snprintf(voltage_text,
+                 sizeof(voltage_text),
+                 "%d.%02dV",
+                 voltage_whole,
+                 voltage_frac);
+
+        snprintf(current_text,
+                 sizeof(current_text),
+                 "%d.%02dA",
+                 current_whole,
+                 current_frac);
+
+        snprintf(power_text,
+                 sizeof(power_text),
+                 "%d.%02dW",
+                 power_whole,
+                 power_frac);
+
+        snprintf(relay_text,
+                 sizeof(relay_text),
+                 light_state ? "ON" : "OFF");
+
+        // ================= UI =================
 
         oled_clear_buffer();
-        oled_draw_text(0, 0, "GM009605 OLED");
-        oled_draw_icon(112, 0, ble_connected);
-        oled_draw_text(0, 2, line1);
-        oled_draw_text(0, 4, line2);
-        oled_draw_text(0, 6, line3);
+
+        // Header
+        oled_draw_text(30, 0, "EVOLTE");
+        oled_draw_hline(0, 10, 128);
+
+        // Voltage
+        oled_draw_text_scaled(0, 16, "V", 1);
+        oled_draw_text_scaled(18, 16, voltage_text, 1);
+
+        // Current
+        oled_draw_text_scaled(0, 32, "I", 1);
+        oled_draw_text_scaled(18, 32, current_text, 1);
+
+        // Power
+        oled_draw_text_scaled(0, 48, "P", 1);
+        oled_draw_text_scaled(18, 48, power_text, 1);
+
+        // Relay status
+        oled_draw_text(90, 7, relay_text);
+
         oled_flush_buffer();
 
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
+
 
 //// CODE For Local Server Starts
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
@@ -667,15 +919,54 @@ void start_webserver(void)
         httpd_register_uri_handler(server, &set_config_uri);
     }
 }
+static void status_led_task(void *param)
+{
+    bool led_state = false;
+
+    while (1)
+    {
+        led_state = !led_state;
+        gpio_set_level(GREEN_LED_GPIO, led_state);
+    
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+void setup_alert_outputs()
+{
+    gpio_config_t io_conf = {
+        .pin_bit_mask =
+            (1ULL << RED_LED_GPIO) |
+            (1ULL << BUZZER_GPIO),
+
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = 0,
+        .pull_down_en = 0,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+
+    gpio_config(&io_conf);
+
+    gpio_set_level(RED_LED_GPIO, 0);
+    gpio_set_level(BUZZER_GPIO, 0);
+}
+
+
 //// Code for Local Server Ends
 void app_main()
 {
+   
     nvs_flash_init();
     setup_light_gpio();
+    setup_status_leds();
     setup_dht_gpio();
+    setup_switch_gpio();
     init_voltage_sensor();
+    setup_alert_outputs();
     init_oled_display();
     xTaskCreate(voltage_sensor_task, "voltage_sensor_task", 4096, NULL, 5, NULL);
+    xTaskCreate(status_led_task, "status_led_task", 2048, NULL, 5, NULL);
+    xTaskCreate(switch_task, "switch_task", 2048, NULL, 5, NULL);
     if (oled_panel_handle != NULL)
     {
         xTaskCreate(oled_task, "oled_task", 4096, NULL, 4, NULL);
